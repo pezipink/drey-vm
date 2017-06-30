@@ -1,5 +1,5 @@
 module vm;
-const dbg = false;
+const dbg =true;
 import core.time;
 import std.stdio;
 import std.typecons;
@@ -209,6 +209,7 @@ class VM
       createobj,
       cloneobj,
       getobj,
+      getobjs,
       delprop,
       p_delprop,
       delobj,
@@ -853,6 +854,17 @@ bool step(MachineStatus* ms, VM* vm)
           push(ms, new HeapVariant(vm.universe.objects[id.get!int]));
           break;
 
+        case vm.opcode.getobjs: // loc -> obj[] on stack
+          auto id = pop(ms);
+          auto loc = unpackLocation(vm,id);
+          HeapVariant[] items;
+          foreach(i;loc.objects)
+            {
+              items ~= new HeapVariant(i);
+            }
+          push(ms, new HeapVariant(items));
+          break;
+
         case vm.opcode.getloc: // name -> location on stack
           auto loc = pop(ms);
           wdb("getloc ", loc);
@@ -1408,7 +1420,8 @@ bool step(MachineStatus* ms, VM* vm)
 
 void handleResponse(MachineStatus* ms, VM* vm, string client, JSONValue response)
 {
-  wdb("in handle response");
+  
+  writeln("in handle response : ", client, " ", response["id"]);
   if(response["id"].type() == JSON_TYPE.INTEGER)
     {
         wdb("in handle response int");
@@ -1540,7 +1553,7 @@ unittest {
           if(!vm.finished)
             {
               JSONValue j;
-              j["id"]="Diver";
+              j["id"]="a";
               handleResponse(&vm.machines[0], &vm, "A", j);
             }
         }
