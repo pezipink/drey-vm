@@ -488,26 +488,15 @@ void stprop(string name, HeapVariant obj, HeapVariant val)
   else if (obj.peek!Location)
     {
       auto lref = obj.get!Location;
-       if(is(val == HeapVariant))
-        {
+      
           lref.props[name] = val;
-        }
-      else
-        {
-          lref.props[name] = new HeapVariant(val);
-        }              
+      
     }
   else if (obj.peek!LocationReference)
     {
       auto lref = obj.get!LocationReference;
-      if(is(val == HeapVariant))
-        {
-          lref.props[name] = val;
-        }
-      else
-        {
-          lref.props[name] = new HeapVariant(val);
-        }
+                lref.props[name] = val;
+      
     }
   else
     {
@@ -584,7 +573,7 @@ bool step(MachineStatus* ms, VM* vm)
           ms.currentFrame.locals[index]=val;
           break;
 
-        case vm.opcode.ldprop: // propname, obj
+        case vm.opcode.ldprop: // propname, obj          
           auto name = pop(ms);
           assert(name.peek!string);
           auto obj = pop(ms);
@@ -592,7 +581,7 @@ bool step(MachineStatus* ms, VM* vm)
           if(obj.peek!GameObject)
             {
               auto prop = (obj.get!GameObject()).props[name.get!string()];
-              if(is(prop == HeapVariant))
+              if(prop.peek!HeapVariant)
                 {
                   result = prop;
                 }
@@ -600,6 +589,22 @@ bool step(MachineStatus* ms, VM* vm)
                 {
                   result = new HeapVariant(prop);
                 }              
+            }
+          else if(obj.peek!Location)
+            {
+              auto loc = obj.peek!Location;
+              auto prop = loc.props[name.get!string()];
+              
+              if(is(prop == prop.peek!HeapVariant))
+                {
+                  
+                  result = prop.get!HeapVariant;
+                }
+              else
+                {
+
+                  result = new HeapVariant(prop);
+                }  
             }
           else if(obj.peek!LocationReference)
             {
@@ -753,9 +758,10 @@ bool step(MachineStatus* ms, VM* vm)
         case vm.opcode.beq: // address vals
           auto address = readInt(ms,vm);
           auto vals = pop2(ms);
-          wdb("beq ", vals, " : ", address);
+
           if(vals[0].var == vals[1].var)
             {
+                        wdb("beq ", vals, " : ", address);
               ms.pc += address - 5;
             }
           break;
@@ -1280,7 +1286,7 @@ bool step(MachineStatus* ms, VM* vm)
           auto l = list.peek!(HeapVariant[]);
           auto len =(*l).length;
           push(ms,new HeapVariant(cast(int)len));
-          wdb("listlen ", list);
+          wdb("listlen ", list, " ", len);
           break;
 
         case vm.opcode.p_len:
@@ -1288,8 +1294,8 @@ bool step(MachineStatus* ms, VM* vm)
           assert(list.peek!(HeapVariant[]));
           auto l = list.peek!(HeapVariant[]);
           auto len =(*l).length;
-          push(ms,new HeapVariant(cast(int)len-1));
-          wdb("listlen ", list);
+          push(ms,new HeapVariant(cast(int)len));
+          wdb("listlen ", list, " ", cast(int)len);
           break;
 
 
