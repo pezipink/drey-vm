@@ -5,6 +5,7 @@ import std.stdio;
 import std.typecons;
 import std.conv;
 import std.json;
+import std.string;
 import threading = core.thread;
 import std.concurrency;
 import std.format;
@@ -49,13 +50,13 @@ struct ClientMessage
 {
   string client;
   MessageType type;
-  string json;  
+  string json;
 }
 
 class Request
 {
   string title;
-  Tuple!(HeapVariant,string)[] actions;  
+  Tuple!(string,string)[] actions;  
 }
 
 class GameObject
@@ -182,8 +183,6 @@ class VM
       p_ldprop,
       stprop,
       p_stprop,
-      hasprop,
-      p_hasprop,
       add,
       sub,
       mul,
@@ -191,9 +190,16 @@ class VM
       mod,
       rndi,
 
-      concat,
-      cstr,
-      cint,
+      startswith,
+      p_startswith,
+      endswith,
+      p_endswith,
+      contains,
+      p_contains,
+      indexof,
+      p_indexof,
+      substring,
+      p_substring,
       
       ceq,
       cne,
@@ -263,9 +269,7 @@ class VM
       p_addaction,
 
       suspend,
-      suspendu,
-      fallback,
-
+      cut,
       say,
 
       call,
@@ -279,8 +283,7 @@ class VM
 
   // can have many machine status to enable
   // a machine rewind (un-doable co-routines)
-  MachineStatus[int] machines;
-  HeapVariant[int][string]  awaitingResposnes;
+  MachineStatus[] machines;  
   int maxResponse;
   ubyte[] program;
   int requiredPlayers;
@@ -293,6 +296,11 @@ class VM
   string[int] strings;  //string table
   bool finished;
 
+  @property MachineStatus* CurrentMachine()
+  {
+    return &machines[$-1];
+  }
+  
   @property HeapVariant[string] players()
   {
      auto p = universe.objects[-1].props["players"].peek!(HeapVariant[string]);
@@ -333,6 +341,8 @@ struct MachineStatus
   int pc;
   StackFrame[] callStack;
   HeapVariant[] evalStack;
+  HeapVariant waitingMessage;
+  string[string] validChoices;
   @property StackFrame* currentFrame(){ return &callStack[$-1]; }
 }
 
@@ -381,7 +391,7 @@ int readInt(MachineStatus* cr, const VM* vm)
   return res;
 }
 
-string toRequestJson(VM* vm, string header, Tuple!(HeapVariant,string)[] pairs )
+string toRequestJson(VM* vm, string header, Tuple!(string,string)[] pairs, bool includeUndo )
 {
   JSONValue js;
   js["type"] = "request";  
@@ -391,21 +401,19 @@ string toRequestJson(VM* vm, string header, Tuple!(HeapVariant,string)[] pairs )
   foreach(kvp;pairs)
     {
       JSONValue choice;
-      if(kvp[0].peek!int)
-        {
-          choice["id"] = kvp[0].get!int;
-        }
-      else if(kvp[0].peek!string)
-        {
-          choice["id"] = kvp[0].get!string;
-        }
-      else
-        {
-          assert(false, "currently only support ints and strings in json requests");
-        }
+      choice["id"] = kvp[0];      
       choice["text"] = kvp[1];
       choices ~= choice;
     }
+
+  if(includeUndo)
+    {
+      JSONValue choice;
+      choice["id"] = "__UNDO__";      
+      choice["text"] = "";
+      choices ~= choice;  
+    }
+  
     js["choices"] = JSONValue(choices);
   return js.toString;
 }
@@ -555,12 +563,57 @@ void stprop(string name, HeapVariant obj, HeapVariant val)
       assert(false, "stprop only supports GameObject and LocationReference");
     }
 }
+void indexOf(MachineStatus* ms, string key, HeapVariant obj)
+{
+  // later we can support arrays here, for now just strings
+  auto str = obj.get!string;
+  import std.string : indexOf;
+  push(ms, new HeapVariant(str.indexOf(key)));
+}
 
-void hasprop(MachineStatus* ms, string key, HeapVariant obj)
+void substring(MachineStatus* ms, int start, int len, string obj)
+{
+  // later we can support arrays here, for now just strings
+  import std.string : indexOf;
+  string split;
+  if(len == -1)
+    {
+      split = obj[start .. $];
+    }
+  else
+    {
+      split = obj[start .. start + len];
+    }
+  
+  push(ms, new HeapVariant(split));
+}
+
+void contains(MachineStatus* ms, string key, HeapVariant obj)
 {
   if(obj.peek!GameObject)
     {
       push(ms, new HeapVariant((key in (obj.get!GameObject()).props) != null));
+    }
+  else if(obj.peek!string)
+    {
+      auto val = obj.get!string;
+      import std.string : indexOf;
+      push(ms, new HeapVariant(val.indexOf(key) > -1));
+    }
+  else if(obj.peek!(HeapVariant[]))
+    {
+      //this only works with strings presently
+      auto lst = obj.get!(HeapVariant[]);
+      foreach(i;lst)
+        {
+          if(i.peek!string && i.var == key)
+            {
+              push(ms, new HeapVariant(true));
+              break;
+            }
+        }
+
+
     }
   //else if (obj.peek!Location)
   // {
@@ -585,896 +638,1042 @@ void hasprop(MachineStatus* ms, string key, HeapVariant obj)
     }
   else
     {
-      assert(false, "hasprop only supports GameObject and LocationReference");
+      assert(false, "contains only supports GameObject and LocationReference");
     }
 
 }
 
-bool step(MachineStatus* ms, VM* vm)
+bool step(VM* vm)
 {
+  MachineStatus* ms = vm.CurrentMachine;
   // try
   //   {
       
-      auto ins = cast(vm.opcode)readByte(ms,vm);
-      wdb("ins : ", ins);
-      switch(ins)
+  auto ins = cast(vm.opcode)readByte(ms,vm);
+  wdb("ins : ", ins);
+  switch(ins)
+    {
+    case vm.opcode.pop:
+      pop(ms);
+      break;
+          
+    case vm.opcode.ldval:
+      auto val = readInt(ms,vm);
+      wdb("ldval ", val);
+      push(ms,new HeapVariant(val));
+      break;
+
+    case vm.opcode.ldvals:
+      auto s = getString(ms,vm);
+      wdb("ldvals ", s);
+      push(ms,new HeapVariant(s));
+      wdb("stack  ", ms.evalStack);
+      break;
+
+    case vm.opcode.ldvalb:
+      int b = readInt(ms,vm);
+      wdb("ldvalb ", b!=0);
+      push(ms,new HeapVariant(b!=0));
+      break;
+      
+    case vm.opcode.ldvar: // str
+      // next int will be a index in the string table
+      // which is then looked up in the current stack
+      // frame locals or the global (bottom) frame
+      auto index = getString(ms,vm);
+
+      if(index in ms.currentFrame.locals)
         {
-        case vm.opcode.pop:
-          pop(ms);
-          break;
-          
-        case vm.opcode.ldval:
-          auto val = readInt(ms,vm);
-          wdb("ldval ", val);
-          push(ms,new HeapVariant(val));
-          break;
-
-        case vm.opcode.ldvals:
-          auto s = getString(ms,vm);
-          wdb("ldvals ", s);
-          push(ms,new HeapVariant(s));
-          wdb("stack  ", ms.evalStack);
-          break;
-
-        case vm.opcode.ldvalb:
-          int b = readInt(ms,vm);
-          wdb("ldvalb ", b!=0);
-          push(ms,new HeapVariant(b!=0));
-          break;
-      
-        case vm.opcode.ldvar: // str
-          // next int will be a index in the string table
-          // which is then looked up in the current stack
-          // frame locals or the global (bottom) frame
-          auto index = getString(ms,vm);
-
-          if(index in ms.currentFrame.locals)
-            {
-              wdb("ldvar local ", index, " : ", ms.currentFrame.locals[index].var);
-              push(ms,ms.currentFrame.locals[index]);
-            }
-          else if(ms.callStack.length > 1 && index in ms.callStack[0].locals)
-            {
-              wdb("ldvar global ", index, " : ", ms.callStack[0].locals[index].var);
-              push(ms,ms.callStack[0].locals[index]);
-            }
-          else
-            {
-              assert(0, format("variable %s was not found in current or global vars", index));
-            }
-
-          break;
-
-        case vm.opcode.stvar: // str
-          auto index = getString(ms,vm);
-          auto val = pop(ms);
-          wdb("stvar ", index, " = ", val.var);
-          ms.currentFrame.locals[index]=val;
-          break;
-
-        case vm.opcode.p_stvar: // str
-          auto index = getString(ms,vm);
-          auto val = peek(ms);
-          wdb("stvar ", index, " = ", val.var);
-          ms.currentFrame.locals[index]=val;
-          break;
-
-        case vm.opcode.ldprop: // propname, obj          
-          auto name = pop(ms);
-          assert(name.peek!string);
-          auto obj = pop(ms);
-          ldprop(ms,name.get!string,obj);
-          break;
-
-        case vm.opcode.p_ldprop: // propname, obj          
-          auto name = pop(ms);
-          assert(name.peek!string);
-          auto obj = peek(ms);
-          ldprop(ms,name.get!string,obj);
-          break;
-
-        case vm.opcode.hasprop:
-          auto name = pop(ms);
-          assert(name.peek!string);
-          auto key = name.get!string;
-          auto obj = pop(ms);
-          hasprop(ms,key,obj);
-          break;
-
-        case vm.opcode.p_hasprop:
-          auto name = pop(ms);
-          assert(name.peek!string);
-          auto key = name.get!string;
-          auto obj = peek(ms);
-          hasprop(ms,key,obj);
-          break;
-                    
-        case vm.opcode.stprop: // val :: key :: obj
-          auto val = pop(ms);
-          auto name = pop(ms);
-          auto obj = pop(ms);
-          stprop(name.get!string,obj,val);
-          break;
-
-        case vm.opcode.p_stprop: // val :: key :: obj
-          auto val = pop(ms);
-          auto name = pop(ms);
-          auto obj = peek(ms);
-          stprop(name.get!string,obj,val);
-          //todo: announce
-          break;
-           
-        case vm.opcode.add: 
-          auto res = pop2(ms);
-          wdb("add ", res);
-          if(res[0].peek!string && res[1].peek!string)
-            {
-              // for the moment allow simple "adding" of strings
-              push(ms, new HeapVariant(res[1] ~ res[0]));
-            }
-          
-          else if(res[0].peek!int && res[1].peek!string)
-            {
-              push(ms, new HeapVariant(res[1] ~ to!string(res[0].get!int)));
-            }
-          else
-            {
-              push(ms,new HeapVariant(res[1] + res[0]));
-            }
-          break;
-
-        case vm.opcode.sub: 
-          auto res = pop2(ms);
-          wdb("sub ", res[0]," ", res[1]);
-          push(ms,new HeapVariant(res[0] - res[1]));
-          break;
-
-        case vm.opcode.mul: 
-          auto res = pop2(ms);
-          wdb("mul ", res);
-          push(ms,new HeapVariant(res[0] * res[1]));      
-          break;
-
-        case vm.opcode.div:
-          auto res = pop2(ms);
-          wdb("quot ", res);
-          push(ms,new HeapVariant(res[0] + res[1]));      
-          break;
-
-        case vm.opcode.mod:
-          auto res = pop2(ms);
-          wdb("mod ", res);
-          push(ms,new HeapVariant(res[0] % res[1]));      
-          break;
-
-        case vm.opcode.rndi: // min max
-          auto vals = pop2(ms);
-          assert(vals[0].peek!int);
-          assert(vals[1].peek!int);
-          wdb("rndi ", vals);
-          push(ms, new HeapVariant(uniform(vals[0].get!int,vals[1].get!int)));
-          break;          
-          
-        case vm.opcode.ceq:
-          auto vals = pop2(ms);
-          wdb("ceq ", vals[0].var, " == ", vals[1].var              );
-          push(ms, new HeapVariant(vals[0].var == vals[1].var));
-          break;
-
-        case vm.opcode.cne:
-          auto vals = pop2(ms);
-          wdb("cne ", vals);
-          push(ms, new HeapVariant(vals[0].var != vals[1].var));
-          break;
-
-        case vm.opcode.clt:
-          auto vals = pop2(ms);
-          wdb("clt ", vals);
-          wdb("clt ", vals[0].var, " == ", vals[1].var              );
-          push(ms, new HeapVariant(vals[0].var < vals[1].var));
-          break;
-
-        case vm.opcode.cgt:
-          auto vals = pop2(ms);
-          wdb("cgt ", vals);
-          push(ms, new HeapVariant(vals[0].var > vals[1].var));
-          break;
-
-        case vm.opcode.beq: // address vals
-          auto address = readInt(ms,vm);
-          auto vals = pop2(ms);
-
-          if(vals[0].var == vals[1].var)
-            {
-                        wdb("beq ", vals, " : ", address);
-              ms.pc += address - 5;
-            }
-          break;
-
-        case vm.opcode.bne: // address vals
-          auto address = readInt(ms,vm);
-          auto vals = pop2(ms);
-          wdb("bne ", vals[0].var, " ", vals[1].var, " : ", address);
-          if(vals[0].var != vals[1].var)
-            {
-              wdb("pc was ", ms.pc);
-              // - 5 because 4 are the address itself
-              // and 1 to comensate for the ++ at the step start
-              ms.pc += (address - 5);
-              wdb("now ", ms.pc);
-            }
-          break;
-
-        case vm.opcode.bgt: // address vals
-          auto address =readInt(ms, vm);
-          auto vals = pop2(ms);
-          wdb("bgt ", vals, " : ", address);
-          if(vals[0].var > vals[1].var)
-            {
-              ms.pc += address - 5;
-            }
-          break;
-
-        case vm.opcode.blt: // address vals
-          //BACON LETTUCE TOMATO
-          auto address = readInt(ms,vm);
-          auto vals = pop2(ms);
-          wdb("blt ", vals, " : ", address);
-          if(vals[0].var < vals[1].var)
-            {
-              ms.pc += address - 5;
-            }
-          break;
-
-        case vm.opcode.branch: // address
-          auto address = readInt(ms,vm);
-          ms.pc += address - 5;
-
-          break;
-
-        case vm.opcode.createobj:
-          auto go = new GameObject();
-          go.id = vm.universe.maxId++;
-          push(ms, new HeapVariant(go));
-          break;
-
-        case vm.opcode.moveobj:
-          wdb("stack : ", ms.evalStack);
-          auto loc = unpackLocation(vm,pop(ms));
-          auto obj = pop(ms).get!GameObject;
-
-          moveObjectRec(vm, loc, obj);
-
-          //TODO: ANnounce
-          break;
-
-                    
-        case vm.opcode.cloneobj: // id. does not clone location. assigns new id. leaves on stack.
-          auto ido = pop(ms);
-          assert(ido.peek!int);
-          auto id = ido.get!int;
-          assert(id in vm.universe.objects);
-          assert(!is(vm.universe.objects[id] == Location));
-          auto obj = vm.universe.objects[id];
-          auto newObj = new GameObject();
-          newObj.visibility = obj.visibility;
-          newObj.id = vm.universe.maxId++;
-          foreach(kvp;obj.props.byKeyValue())
-            {
-              // todo: check for and clone lists
-              // since they will be pointers
-              obj.props[kvp.key]=kvp.value;
-            }
-          wdb("cloneobj ", id, " -> ", newObj.id);
-          //vm.universe.objects[newObj.id] = newObj;      
-          push(ms,new HeapVariant(newObj));
-          //todo: announce
-          break;
-
-        case vm.opcode.getobj: // id -> obj on stack
-          auto id = pop(ms);
-          assert(id.peek!int);
-          wdb("getobj ", id);
-          push(ms, new HeapVariant(vm.universe.objects[id.get!int]));
-          break;
-
-        case vm.opcode.getobjs: // loc -> obj[] on stack
-          auto id = pop(ms);
-          auto loc = unpackLocation(vm,id);
-          HeapVariant[] items;
-          foreach(i;loc.objects)
-            {
-              items ~= new HeapVariant(i);
-            }
-          push(ms, new HeapVariant(items));
-          break;
-
-        case vm.opcode.getloc: // name -> location on stack
-          auto loc = pop(ms);
-          wdb("getloc ", loc);
-          string key;
-          if(loc.peek!string)
-            {
-              key = loc.get!string;
-            }
-          else if(loc.peek!LocationReference)
-            {
-              auto locref = loc.get!LocationReference;
-              key = locref.key;
-            }
-          else if(loc.peek!GameObject)
-            {
-              auto go = loc.get!GameObject;
-              if(go.locationKey != null && go.locationKey != "")
-                {
-                  key = go.locationKey;
-                }
-              else
-                {
-                  assert(false, "no location key on object");
-                }
-            }
-          else
-            {
-              assert(false, "could not determine location");
-            }
-          
-          push(ms, new HeapVariant(vm.universe.locations[key]));
-          break;
-            
-        case vm.opcode.delprop: // key obj
-          auto key = pop(ms);
-          assert(key.peek!string);
-          auto objv = pop(ms);
-          assert(objv.peek!GameObject);
-          auto obj = objv.get!GameObject;
-          wdb("delprop ", key.get!string, " : ", obj.id);
-          obj.props.remove(key.get!string);
-          //todo: announce
-          break;
-
-        case vm.opcode.p_delprop: // key obj
-          auto key = pop(ms);
-          assert(key.peek!string);
-          auto objv = peek(ms);
-          assert(objv.peek!GameObject);
-          auto obj = objv.get!GameObject;
-          wdb("delprop ", key.get!string, " : ", obj.id);
-          obj.props.remove(key.get!string);
-          //todo: announce
-          break;
-
-        case vm.opcode.setvis: // str obj
-          auto str = pop(ms);
-          assert(str.peek!string);
-          auto objv = pop(ms);
-          assert(objv.peek!GameObject);
-          auto obj = objv.get!GameObject;
-          wdb("setvis ", str.get!string, " : ", obj.id);
-          obj.visibility=str.get!string;
-          //todo: announce
-          break;
-
-        case vm.opcode.p_setvis: // str obj
-          auto str = pop(ms);
-          assert(str.peek!string);
-          auto objv = peek(ms);
-          assert(objv.peek!GameObject);
-          auto obj = objv.get!GameObject;
-          wdb("p_setvis ", str.get!string, " : ", obj.id);
-          obj.visibility=str.get!string;
-          //todo: announce
-          break;
-
-        case vm.opcode.genloc: // str
-          auto name = pop(ms);
-          assert(name.peek!string);
-          assert(!(name.get!string in vm.universe.locations), "a location with this key already exists");
-          auto loc = new Location();
-          loc.key = name.get!string;
-          vm.universe.locations[name.get!string] = loc;
-          push(ms,new HeapVariant(loc));
-          wdb("universe location count now ", vm.universe.locations.length);
-          //todo: announce
-          break;
-
-        case vm.opcode.genlocref:
-          push(ms, new HeapVariant(new LocationReference));
-          break;
-          
-        case vm.opcode.setlocsibling:
-          // (locref :: relation :: host)  both can either be a Location or a key
-          auto r = pop(ms).get!LocationReference;
-          auto refs = pop2(ms);
-          auto locPair = unpackLocations(vm, refs[0], refs[1]); 
-          r.key = locPair[0].key;
-          locPair[1].siblings ~= r;
-          // writeln(locPair[1].key, " sibs now", locPair[1].siblings);
-          // foreach(s; locPair[1].siblings)
-          //   {
-          //     writeln(locPair[1].key, " => ", s.key);
-          //     foreach(p;s.props.byKeyValue)
-          //       {
-          //         writeln("\t", p.key, " => ", p.value);
-          //       }
-          //   }
-          
-          break;
-
-        case vm.opcode.p_setlocsibling:
-          // (locref :: relation :: host)  both can either be a Location or a key
-          auto r = pop(ms).get!LocationReference;
-          auto rel = unpackLocation(vm, pop(ms));
-          auto host = unpackLocation(vm, peek(ms));
-          r.key = rel.key;
-          host.siblings ~= r;          
-          break;
-
-        case vm.opcode.setlocparent:
-          // (childlocref :: parent :: child)  both can either be a Location or a key                    
-          auto r = pop(ms).get!LocationReference;
-          auto refs = pop2(ms);
-          auto locPair = unpackLocations(vm, refs[0], refs[1]);
-
-          // link parent to child
-          r.key = locPair[0].key;
-          locPair[0].children ~= r;          
-          // link parent to child
-          auto r2 = new LocationReference();
-          r2.key = locPair[0].key;
-          locPair[1].parent = r2;          
-          break;
-
-        case vm.opcode.p_setlocparent:
-          // (childlocref :: parent :: child)  both can either be a Location or a key
-          auto r = pop(ms).get!LocationReference;
-          auto parent = unpackLocation(vm, pop(ms));
-          auto child = unpackLocation(vm, peek(ms));
-
-          // link parent to child
-          r.key = child.key;
-          parent.children ~= r;          
-          // link child to parent
-          auto r2 = new LocationReference();
-          r2.key = parent.key;
-          child.parent = r2;          
-          break;
-
-        case vm.opcode.setlocchild:
-          // (childlocref :: child  :: parent)  both can either be a Location or a key
-          auto r = pop(ms).get!LocationReference;
-          auto child = unpackLocation(vm,pop(ms));
-          auto parent = unpackLocation(vm,pop(ms));
-
-          // link parent to child
-          r.key = child.key;
-          parent.children ~= r;          
-          // link child to parent
-          auto r2 = new LocationReference();
-          r2.key = parent.key;
-          child.parent = r2;          
-          break;
-
-        case vm.opcode.p_setlocchild:
-          // (childlocref :: child  :: parent)  both can either be a Location or a key
-          auto r = pop(ms).get!LocationReference;
-          auto child = unpackLocation(vm,pop(ms));
-          auto parent = unpackLocation(vm,peek(ms));
-
-          // link parent to child
-          r.key = child.key;
-          parent.children ~= r;          
-          // link child to parent
-          auto r2 = new LocationReference();
-          r2.key = parent.key;
-          child.parent = r2;          
-          break;
-
-        case vm.opcode.getlocsiblings:
-          auto loc = unpackLocation(vm, pop(ms));
-          HeapVariant[] list;
-          foreach(x;loc.siblings)
-            {
-              list ~= new HeapVariant(x);
-            }
-          push(ms,new HeapVariant(list));
-          break;
-
-        case vm.opcode.p_getlocsiblings:
-          auto loc = unpackLocation(vm, peek(ms));
-          HeapVariant[] list;
-          foreach(x;loc.siblings)
-            {
-              list ~= new HeapVariant(x);
-            }
-          push(ms,new HeapVariant(list));
-          break;
-
-        case vm.opcode.getlocchildren:
-          auto loc = unpackLocation(vm, pop(ms));
-          HeapVariant[] list;
-          foreach(x;loc.children)
-            {
-              list ~= new HeapVariant(x);
-            }
-          push(ms,new HeapVariant(list));          
-          break;
-
-        case vm.opcode.p_getlocchildren:
-          auto loc = unpackLocation(vm, peek(ms));
-          HeapVariant[] list;
-          foreach(x;loc.children)
-            {
-              list ~= new HeapVariant(x);
-            }
-          push(ms,new HeapVariant(list));          
-          break;
-
-        case vm.opcode.getlocparent:
-          auto loc = unpackLocation(vm, pop(ms));
-          push(ms,new HeapVariant(loc.parent));
-          break;
-
-        case vm.opcode.p_getlocparent:
-          auto loc = unpackLocation(vm, peek(ms));
-          push(ms,new HeapVariant(loc.parent));
-
-          break;
-
-        // are these actually needed?
-        // case vm.opcode.adduni: // adds object on the stack to universe
-        //   auto o = pop(ms);
-        //   assert(o.peek!GameObject);
-        //   auto go = o.get!GameObject;
-        //   vm.universe.objects[go.id] = go;
-        //   break;
-
-        // case vm.opcode.deluni: // adds object on the stack to universe
-        //   auto o = pop(ms);
-        //   assert(o.peek!GameObject);
-        //   auto go = o.get!GameObject;
-        //   vm.universe.objects.remove(go.id);
-        //   break;
-                   
-        case vm.opcode.createlist:
-          HeapVariant[] newList;
-          push(ms, new HeapVariant(newList));
-          break;
-
-        case vm.opcode.appendlist: // appends top of stack to next stack (a list )
-          // val :: list
-          wdb("stack : ", ms.evalStack);
-          auto item = pop(ms);
-          wdb("item is = ", item);
-          auto list = pop(ms);
-          assert(list.peek!(HeapVariant[]));
-          wdb("appendlist ", item, " :: ", list);          
-          // we must peek here to get a pointer otherwise
-          // it will get copied
-          if( auto l = list.peek!(HeapVariant[]))
-            {
-              *l ~= item;
-            }
-          wdb("list now : ", (list.get!(HeapVariant[])));
-          break;
-
-        case vm.opcode.p_appendlist: // appends top of stack to next stack (a list )
-          // val :: list
-          wdb("stack : ", ms.evalStack);
-          auto item = pop(ms);
-          wdb("item is = ", item);
-          auto list = peek(ms);
-          assert(list.peek!(HeapVariant[]));
-          wdb("appendlist ", item, " :: ", list);          
-          // we must peek here to get a pointer otherwise
-          // it will get copied
-          if( auto l = list.peek!(HeapVariant[]))
-            {
-              *l ~= item;
-            }
-          wdb("list now : ", (list.get!(HeapVariant[])));
-          break;
-          
-                  
-        case vm.opcode.removelist: //  creates a new list removing keys
-          // val :: list
-          wdb("removelist");
-          wdb("stack : ", ms.evalStack);
-          auto key = pop(ms);
-          wdb("item is = ", key.var);
-          auto list = pop(ms);
-          assert(list.peek!(HeapVariant[]));
-
-          HeapVariant[] newList;
-          if( auto l = list.peek!(HeapVariant[]))
-            {
-              foreach(i; *l)
-                {
-                  wdb("testing if ", i, "!= ", key.var);
-                  if(i.var != key.var)
-                    {
-                      newList ~= i;
-                    }
-                }
-            }
-
-          wdb("list on stack now : ");
-          foreach(l;newList)
-            {
-              wdb(l.var);
-            }
-
-          push(ms, new HeapVariant(newList));
-          break;
-
-        case vm.opcode.p_removelist: //  creates a new list removing keys
-          // val :: list
-          wdb("removelist");
-          wdb("stack : ", ms.evalStack);
-          auto key = pop(ms);
-          wdb("item is = ", key.var);
-          auto list = peek(ms);
-          assert(list.peek!(HeapVariant[]));
-
-          HeapVariant[] newList;
-          if( auto l = list.peek!(HeapVariant[]))
-            {
-              foreach(i; *l)
-                {
-                  wdb("testing if ", i, "!= ", key.var);
-                  if(i.var != key.var)
-                    {
-                      newList ~= i;
-                    }
-                }
-            }
-
-          wdb("list on stack now : ");
-          foreach(l;newList)
-            {
-              wdb(l.var);
-            }
-          
-          push(ms, new HeapVariant(newList));
-          break;
-          
-        case vm.opcode.index:
-          wdb("listindex ",ms.evalStack);
-          auto index = pop(ms);
-          auto list = pop(ms);
-          wdb(list.var);
-          assert(list.peek!(HeapVariant[]));
-          auto i = index.get!int;
-          if(auto listt = list.peek!(HeapVariant[]))
-            {
-              wdb("listindex ", (*listt), " ", index.var);
-              push(ms,(*listt)[i]);
-
-            }
-
-          break;
-
-        case vm.opcode.p_index:
-          wdb("listindex ",ms.evalStack);
-          auto index = pop(ms);
-          auto list = peek(ms);
-          wdb(list.var);
-          assert(list.peek!(HeapVariant[]));
-          auto i = index.get!int;
-          if(auto listt = list.peek!(HeapVariant[]))
-            {
-              wdb("listindex ", (*listt), " ", index.var);
-              push(ms,(*listt)[i]);
-
-            }
-
-          break;
-
-        case vm.opcode.keys:
-          wdb("keys");
-          auto ptr = pop(ms);
-          HeapVariant[string] aa;
-          if(ptr.peek!(HeapVariant[string]))
-            {
-              aa = ptr.get!(HeapVariant[string]);
-            }
-          else if(ptr.peek!GameObject)
-            {
-              auto go = ptr.get!GameObject;
-              aa = go.props;
-            }
-          else
-            {
-              assert(false, "values only supports HeapVaraint[] and GameObject");
-            }
-          HeapVariant[] keys;          
-          foreach(k;aa.keys)
-            {
-              keys ~= new HeapVariant(k);
-            }
-
-          push(ms,new HeapVariant(keys));  
-          break;
-
-        case vm.opcode.values:
-          wdb("values");
-          auto ptr = pop(ms);
-          HeapVariant[string] aa;
-          if(ptr.peek!(HeapVariant[string]))
-            {
-              aa = ptr.get!(HeapVariant[string]);
-            }
-          else if(ptr.peek!GameObject)
-            {
-              auto go = ptr.get!GameObject;
-              aa = go.props;
-            }
-          else
-            {
-              assert(false, "values only supports HeapVaraint[] and GameObject");
-            }
-          HeapVariant[] values;                    
-          foreach(v;aa.values)
-            {
-              values ~= new HeapVariant(v);
-            }
-
-          push(ms,new HeapVariant(values));  
-          break;
-          
-        case vm.opcode.len:
-          auto list = pop(ms);          
-          wdb("!! ", list.var);
-          assert(list.peek!(HeapVariant[]));
-          auto l = list.peek!(HeapVariant[]);
-          auto len =(*l).length;
-          push(ms,new HeapVariant(cast(int)len));
-          wdb("listlen ", list, " ", len);
-          break;
-
-        case vm.opcode.p_len:
-          auto list = peek(ms);
-          assert(list.peek!(HeapVariant[]));
-          auto l = list.peek!(HeapVariant[]);
-          auto len =(*l).length;
-          push(ms,new HeapVariant(cast(int)len));
-          wdb("listlen ", list, " ", cast(int)len);
-          break;
-
-
-        case vm.opcode.genreq: // string -> request on stack
-          auto title = pop(ms);
-          assert(title.peek!string);
-          wdb("genreq ", title);
-          auto r = new Request();
-          r.title = title.get!string;
-          push(ms, new HeapVariant(r));      
-          break;
-
-        case vm.opcode.addaction: // variant :: string :: request
-          auto vals = pop2(ms);
-          auto reqv = pop(ms);
-          //assert(vals[0].peek!int);
-          assert(vals[1].peek!string);
-          assert(reqv.peek!Request);
-          auto req = reqv.get!Request;
-          wdb("addaction ", vals[0], vals[1], " : ", req.actions);
-          req.actions ~= tuple(vals[0], vals[1].get!string);
-          break;
-
-        case vm.opcode.say: // message :: client
-          wdb("val stack ", ms.evalStack[0].var, " ", ms.evalStack[1].var);
-          auto msg = pop(ms);
-          assert(msg.peek!string);
-          auto client = pop(ms);
-          assert(client.peek!string);
-          auto clientid = client.get!string;
-          auto cm =
-            ClientMessage
-            (clientid,
-             MessageType.Data,
-             format("{\"type\":\"chat\",\"id\":\"%s\",\"msg\":\"[server] %s\"}",
-                    clientid, msg.get!string));
-          writeln("sending say  message to client ", clientid, " " , cm);
-          vm.zmqThread.send(cm);
-
-          break;
-      
-        case vm.opcode.suspend: // clientid :: req
-          auto key = pop(ms);
-          assert(key.peek!string);        
-          auto clientid = key.get!string;
-          auto reqv = pop(ms);
-          assert(reqv.peek!Request);
-          auto req = reqv.get!Request;
-          auto cm =
-            ClientMessage
-            (clientid,
-             MessageType.Data,
-             toRequestJson(vm, req.title, req.actions));
-          writeln("sending suspend message to client ", clientid, " " , cm);
-          // auto pp = vm.universe.objects[-1].props["players"].get!(Variant[string]);
-          // auto players = *pp;
-          //   wdb("current players ", pp, " : ", players);
-          vm.zmqThread.send(cm);
-
-          return true; //wait = Waiting.WaitRequested;
-
-        case vm.opcode.call:
-          auto address = readInt(ms,vm);
-          wdb("call ", address);
-          wdb("pc is currenlty ", ms.pc);
-          StackFrame sf;
-          sf.returnAddress = ms.pc;
-          ms.callStack ~= sf;
-          ms.pc += (address - 5);
-          break;
-          
-        case vm.opcode.ret:
-          wdb("ret");
-          if(ms.callStack.length > 1)
-            {
-              ms.pc = ms.callStack[$-1].returnAddress;
-              wdb("pc now ", ms.pc, " call stack length ", ms.callStack.length);
-              ms.callStack = ms.callStack[0..$-1];
-                            wdb("pc now ", ms.pc, " call stack length ", ms.callStack.length);
-            }
-          else
-            {
-              wdb("end of main function");
-              vm.finished = true;
-              return true;
-            }
-            
-          break;
-        case vm.opcode.dbg:
-          write(pop(ms).var);
-          break;
-        case vm.opcode.dbgl:
-          writeln(pop(ms).var);
-          break;
-
-        default:
-          wdb("unknown opcode ", ins);
-          assert(0);
+          wdb("ldvar local ", index, " : ", ms.currentFrame.locals[index].var);
+          push(ms,ms.currentFrame.locals[index]);
+        }
+      else if(ms.callStack.length > 1 && index in ms.callStack[0].locals)
+        {
+          wdb("ldvar global ", index, " : ", ms.callStack[0].locals[index].var);
+          push(ms,ms.callStack[0].locals[index]);
+        }
+      else
+        {
+          assert(0, format("variable %s was not found in current or global vars", index));
         }
 
-      return false;
-      //    }
-  // catch(Exception e)
-  //   {
-  //     wdb("Exception ! ", e);
-  //     throw new Exception("");
-  //     //      return false;
-  //   }
+      break;
+
+    case vm.opcode.stvar: // str
+      auto index = getString(ms,vm);
+      auto val = pop(ms);
+      wdb("stvar ", index, " = ", val.var);
+      ms.currentFrame.locals[index]=val;
+      break;
+
+    case vm.opcode.p_stvar: // str
+      auto index = getString(ms,vm);
+      auto val = peek(ms);
+      wdb("stvar ", index, " = ", val.var);
+      ms.currentFrame.locals[index]=val;
+      break;
+
+    case vm.opcode.ldprop: // propname, obj          
+      auto name = pop(ms);
+      assert(name.peek!string);
+      auto obj = pop(ms);
+      ldprop(ms,name.get!string,obj);
+      break;
+
+    case vm.opcode.p_ldprop: // propname, obj          
+      auto name = pop(ms);
+      assert(name.peek!string);
+      auto obj = peek(ms);
+      ldprop(ms,name.get!string,obj);
+      break;
+
+    case vm.opcode.stprop: // val :: key :: obj
+      auto val = pop(ms);
+      auto name = pop(ms);
+      auto obj = pop(ms);
+      stprop(name.get!string,obj,val);
+      break;
+
+    case vm.opcode.p_stprop: // val :: key :: obj
+      auto val = pop(ms);
+      auto name = pop(ms);
+      auto obj = peek(ms);
+      stprop(name.get!string,obj,val);
+      //todo: announce
+      break;
+           
+    case vm.opcode.add: 
+      auto res = pop2(ms);
+      wdb("add ", res);
+      if(res[0].peek!string && res[1].peek!string)
+        {
+          // for the moment allow simple "adding" of strings
+          push(ms, new HeapVariant(res[1] ~ res[0]));
+        }
+          
+      else if(res[0].peek!int && res[1].peek!string)
+        {
+          push(ms, new HeapVariant(res[1] ~ to!string(res[0].get!int)));
+        }
+      else
+        {
+          push(ms,new HeapVariant(res[1] + res[0]));
+        }
+      break;
+
+    case vm.opcode.sub: 
+      auto res = pop2(ms);
+      wdb("sub ", res[0]," ", res[1]);
+      push(ms,new HeapVariant(res[0] - res[1]));
+      break;
+
+    case vm.opcode.mul: 
+      auto res = pop2(ms);
+      wdb("mul ", res);
+      push(ms,new HeapVariant(res[0] * res[1]));      
+      break;
+
+    case vm.opcode.div:
+      auto res = pop2(ms);
+      wdb("quot ", res);
+      push(ms,new HeapVariant(res[0] + res[1]));      
+      break;
+
+    case vm.opcode.mod:
+      auto res = pop2(ms);
+      wdb("mod ", res);
+      push(ms,new HeapVariant(res[0] % res[1]));      
+      break;
+
+    case vm.opcode.rndi: // min max
+      auto vals = pop2(ms);
+      assert(vals[0].peek!int);
+      assert(vals[1].peek!int);
+      wdb("rndi ", vals);
+      push(ms, new HeapVariant(uniform(vals[0].get!int,vals[1].get!int)));
+      break;          
+
+    case vm.opcode.startswith:
+      auto val = pop(ms);
+      auto str = pop(ms);
+      assert(val.peek!string);
+      assert(str.peek!string);
+      auto v = val.get!string;
+      auto s = str.get!string;
+      push(ms, new HeapVariant(s.startsWith(v)));
+      break;
+          
+    case vm.opcode.p_startswith:
+      auto val = pop(ms);
+      auto str = peek(ms);
+      assert(val.peek!string);
+      assert(str.peek!string);
+      auto v = val.get!string;
+      auto s = str.get!string;
+      push(ms, new HeapVariant(s.startsWith(v)));
+      break;
+          
+    case vm.opcode.endswith:
+      auto val = pop(ms);
+      auto str = pop(ms);
+      assert(val.peek!string);
+      assert(str.peek!string);
+      auto v = val.get!string;
+      auto s = str.get!string;
+      push(ms, new HeapVariant(s.endsWith(v)));
+      break;
+          
+    case vm.opcode.p_endswith:
+      auto val = pop(ms);
+      auto str = peek(ms);
+      assert(val.peek!string);
+      assert(str.peek!string);
+      auto v = val.get!string;
+      auto s = str.get!string;
+      push(ms, new HeapVariant(s.endsWith(v)));
+      break;
+
+    case vm.opcode.indexof:
+      auto val = pop(ms);
+      auto str = pop(ms);
+      assert(val.peek!string);
+      assert(str.peek!string);
+      auto v = val.get!string;
+      auto s = str.get!string;
+      indexOf(ms, v, str);
+      break;
+
+    case vm.opcode.p_indexof:
+      auto val = pop(ms);
+      auto str = peek(ms);
+      assert(val.peek!string);
+      assert(str.peek!string);
+      auto v = val.get!string;
+      auto s = str.get!string;
+      indexOf(ms, v, str);
+      break;
+
+    case vm.opcode.substring:
+      auto len = pop(ms);
+      auto start = pop(ms);
+      auto str = pop(ms);
+      assert(str.peek!string);
+      assert(len.peek!int);
+      assert(start.peek!int);
+      substring(ms, start.get!int, len.get!int,  str.get!string);
+      break;
+          
+    case vm.opcode.p_substring:
+      auto len = pop(ms);
+      auto start = pop(ms);
+      auto str = peek(ms);
+      assert(str.peek!string);
+      assert(len.peek!int);
+      assert(start.peek!int);
+      substring(ms, start.get!int, len.get!int,  str.get!string);
+      break;
+          
+    case vm.opcode.contains:
+      auto val = pop(ms);
+      auto obj = pop(ms);
+      assert(val.peek!string);
+      auto v = val.get!string;
+      contains(ms, v, obj);
+      break;
+          
+    case vm.opcode.p_contains:
+      auto val = pop(ms);
+      auto obj = peek(ms);
+      assert(val.peek!string);
+      auto v = val.get!string;
+      contains(ms, v, obj);
+      break;
+
+    case vm.opcode.ceq:
+      auto vals = pop2(ms);
+      wdb("ceq ", vals[0].var, " == ", vals[1].var              );
+      push(ms, new HeapVariant(vals[0].var == vals[1].var));
+      break;
+
+    case vm.opcode.cne:
+      auto vals = pop2(ms);
+      wdb("cne ", vals);
+      push(ms, new HeapVariant(vals[0].var != vals[1].var));
+      break;
+
+    case vm.opcode.clt:
+      auto vals = pop2(ms);
+      wdb("clt ", vals);
+      wdb("clt ", vals[0].var, " == ", vals[1].var              );
+      push(ms, new HeapVariant(vals[0].var < vals[1].var));
+      break;
+
+    case vm.opcode.cgt:
+      auto vals = pop2(ms);
+      wdb("cgt ", vals);
+      push(ms, new HeapVariant(vals[0].var > vals[1].var));
+      break;
+
+    case vm.opcode.beq: // address vals
+      auto address = readInt(ms,vm);
+      auto vals = pop2(ms);
+
+      if(vals[0].var == vals[1].var)
+        {
+          wdb("beq ", vals, " : ", address);
+          ms.pc += address - 5;
+        }
+      break;
+
+    case vm.opcode.bne: // address vals
+      auto address = readInt(ms,vm);
+      auto vals = pop2(ms);
+      wdb("bne ", vals[0].var, " ", vals[1].var, " : ", address);
+      if(vals[0].var != vals[1].var)
+        {
+          wdb("pc was ", ms.pc);
+          // - 5 because 4 are the address itself
+          // and 1 to comensate for the ++ at the step start
+          ms.pc += (address - 5);
+          wdb("now ", ms.pc);
+        }
+      break;
+
+    case vm.opcode.bgt: // address vals
+      auto address =readInt(ms, vm);
+      auto vals = pop2(ms);
+      wdb("bgt ", vals, " : ", address);
+      if(vals[0].var > vals[1].var)
+        {
+          ms.pc += address - 5;
+        }
+      break;
+
+    case vm.opcode.blt: // address vals
+      //BACON LETTUCE TOMATO
+      auto address = readInt(ms,vm);
+      auto vals = pop2(ms);
+      wdb("blt ", vals, " : ", address);
+      if(vals[0].var < vals[1].var)
+        {
+          ms.pc += address - 5;
+        }
+      break;
+
+    case vm.opcode.branch: // address
+      auto address = readInt(ms,vm);
+      ms.pc += address - 5;
+
+      break;
+
+    case vm.opcode.createobj:
+      auto go = new GameObject();
+      go.id = vm.universe.maxId++;
+      push(ms, new HeapVariant(go));
+      break;
+
+    case vm.opcode.moveobj:
+      wdb("stack : ", ms.evalStack);
+      auto loc = unpackLocation(vm,pop(ms));
+      auto obj = pop(ms).get!GameObject;
+
+      moveObjectRec(vm, loc, obj);
+
+      //TODO: ANnounce
+      break;
+
+                    
+    case vm.opcode.cloneobj: // id. does not clone location. assigns new id. leaves on stack.
+      auto ido = pop(ms);
+      assert(ido.peek!int);
+      auto id = ido.get!int;
+      assert(id in vm.universe.objects);
+      assert(!is(vm.universe.objects[id] == Location));
+      auto obj = vm.universe.objects[id];
+      auto newObj = new GameObject();
+      newObj.visibility = obj.visibility;
+      newObj.id = vm.universe.maxId++;
+      foreach(kvp;obj.props.byKeyValue())
+        {
+          // todo: check for and clone lists
+          // since they will be pointers
+          obj.props[kvp.key]=kvp.value;
+        }
+      wdb("cloneobj ", id, " -> ", newObj.id);
+      //vm.universe.objects[newObj.id] = newObj;      
+      push(ms,new HeapVariant(newObj));
+      //todo: announce
+      break;
+
+    case vm.opcode.getobj: // id -> obj on stack
+      auto id = pop(ms);
+      assert(id.peek!int);
+      wdb("getobj ", id);
+      push(ms, new HeapVariant(vm.universe.objects[id.get!int]));
+      break;
+
+    case vm.opcode.getobjs: // loc -> obj[] on stack
+      auto id = pop(ms);
+      auto loc = unpackLocation(vm,id);
+      HeapVariant[] items;
+      foreach(i;loc.objects)
+        {
+          items ~= new HeapVariant(i);
+        }
+      push(ms, new HeapVariant(items));
+      break;
+
+    case vm.opcode.getloc: // name -> location on stack
+      auto loc = pop(ms);
+      wdb("getloc ", loc);
+      string key;
+      if(loc.peek!string)
+        {
+          key = loc.get!string;
+        }
+      else if(loc.peek!LocationReference)
+        {
+          auto locref = loc.get!LocationReference;
+          key = locref.key;
+        }
+      else if(loc.peek!GameObject)
+        {
+          auto go = loc.get!GameObject;
+          if(go.locationKey != null && go.locationKey != "")
+            {
+              key = go.locationKey;
+            }
+          else
+            {
+              assert(false, "no location key on object");
+            }
+        }
+      else
+        {
+          assert(false, "could not determine location");
+        }
+          
+      push(ms, new HeapVariant(vm.universe.locations[key]));
+      break;
+            
+    case vm.opcode.delprop: // key obj
+      auto key = pop(ms);
+      assert(key.peek!string);
+      auto objv = pop(ms);
+      assert(objv.peek!GameObject);
+      auto obj = objv.get!GameObject;
+      wdb("delprop ", key.get!string, " : ", obj.id);
+      obj.props.remove(key.get!string);
+      //todo: announce
+      break;
+
+    case vm.opcode.p_delprop: // key obj
+      auto key = pop(ms);
+      assert(key.peek!string);
+      auto objv = peek(ms);
+      assert(objv.peek!GameObject);
+      auto obj = objv.get!GameObject;
+      wdb("delprop ", key.get!string, " : ", obj.id);
+      obj.props.remove(key.get!string);
+      //todo: announce
+      break;
+
+    case vm.opcode.setvis: // str obj
+      auto str = pop(ms);
+      assert(str.peek!string);
+      auto objv = pop(ms);
+      assert(objv.peek!GameObject);
+      auto obj = objv.get!GameObject;
+      wdb("setvis ", str.get!string, " : ", obj.id);
+      obj.visibility=str.get!string;
+      //todo: announce
+      break;
+
+    case vm.opcode.p_setvis: // str obj
+      auto str = pop(ms);
+      assert(str.peek!string);
+      auto objv = peek(ms);
+      assert(objv.peek!GameObject);
+      auto obj = objv.get!GameObject;
+      wdb("p_setvis ", str.get!string, " : ", obj.id);
+      obj.visibility=str.get!string;
+      //todo: announce
+      break;
+
+    case vm.opcode.genloc: // str
+      auto name = pop(ms);
+      assert(name.peek!string);
+      assert(!(name.get!string in vm.universe.locations), "a location with this key already exists");
+      auto loc = new Location();
+      loc.key = name.get!string;
+      vm.universe.locations[name.get!string] = loc;
+      push(ms,new HeapVariant(loc));
+      wdb("universe location count now ", vm.universe.locations.length);
+      //todo: announce
+      break;
+
+    case vm.opcode.genlocref:
+      push(ms, new HeapVariant(new LocationReference));
+      break;
+          
+    case vm.opcode.setlocsibling:
+      // (locref :: relation :: host)  both can either be a Location or a key
+      auto r = pop(ms).get!LocationReference;
+      auto refs = pop2(ms);
+      auto locPair = unpackLocations(vm, refs[0], refs[1]); 
+      r.key = locPair[0].key;
+      locPair[1].siblings ~= r;
+      // writeln(locPair[1].key, " sibs now", locPair[1].siblings);
+      // foreach(s; locPair[1].siblings)
+      //   {
+      //     writeln(locPair[1].key, " => ", s.key);
+      //     foreach(p;s.props.byKeyValue)
+      //       {
+      //         writeln("\t", p.key, " => ", p.value);
+      //       }
+      //   }
+          
+      break;
+
+    case vm.opcode.p_setlocsibling:
+      // (locref :: relation :: host)  both can either be a Location or a key
+      auto r = pop(ms).get!LocationReference;
+      auto rel = unpackLocation(vm, pop(ms));
+      auto host = unpackLocation(vm, peek(ms));
+      r.key = rel.key;
+      host.siblings ~= r;          
+      break;
+
+    case vm.opcode.setlocparent:
+      // (childlocref :: parent :: child)  both can either be a Location or a key                    
+      auto r = pop(ms).get!LocationReference;
+      auto refs = pop2(ms);
+      auto locPair = unpackLocations(vm, refs[0], refs[1]);
+
+      // link parent to child
+      r.key = locPair[0].key;
+      locPair[0].children ~= r;          
+      // link parent to child
+      auto r2 = new LocationReference();
+      r2.key = locPair[0].key;
+      locPair[1].parent = r2;          
+      break;
+
+    case vm.opcode.p_setlocparent:
+      // (childlocref :: parent :: child)  both can either be a Location or a key
+      auto r = pop(ms).get!LocationReference;
+      auto parent = unpackLocation(vm, pop(ms));
+      auto child = unpackLocation(vm, peek(ms));
+
+      // link parent to child
+      r.key = child.key;
+      parent.children ~= r;          
+      // link child to parent
+      auto r2 = new LocationReference();
+      r2.key = parent.key;
+      child.parent = r2;          
+      break;
+
+    case vm.opcode.setlocchild:
+      // (childlocref :: child  :: parent)  both can either be a Location or a key
+      auto r = pop(ms).get!LocationReference;
+      auto child = unpackLocation(vm,pop(ms));
+      auto parent = unpackLocation(vm,pop(ms));
+
+      // link parent to child
+      r.key = child.key;
+      parent.children ~= r;          
+      // link child to parent
+      auto r2 = new LocationReference();
+      r2.key = parent.key;
+      child.parent = r2;          
+      break;
+
+    case vm.opcode.p_setlocchild:
+      // (childlocref :: child  :: parent)  both can either be a Location or a key
+      auto r = pop(ms).get!LocationReference;
+      auto child = unpackLocation(vm,pop(ms));
+      auto parent = unpackLocation(vm,peek(ms));
+
+      // link parent to child
+      r.key = child.key;
+      parent.children ~= r;          
+      // link child to parent
+      auto r2 = new LocationReference();
+      r2.key = parent.key;
+      child.parent = r2;          
+      break;
+
+    case vm.opcode.getlocsiblings:
+      auto loc = unpackLocation(vm, pop(ms));
+      HeapVariant[] list;
+      foreach(x;loc.siblings)
+        {
+          list ~= new HeapVariant(x);
+        }
+      push(ms,new HeapVariant(list));
+      break;
+
+    case vm.opcode.p_getlocsiblings:
+      auto loc = unpackLocation(vm, peek(ms));
+      HeapVariant[] list;
+      foreach(x;loc.siblings)
+        {
+          list ~= new HeapVariant(x);
+        }
+      push(ms,new HeapVariant(list));
+      break;
+
+    case vm.opcode.getlocchildren:
+      auto loc = unpackLocation(vm, pop(ms));
+      HeapVariant[] list;
+      foreach(x;loc.children)
+        {
+          list ~= new HeapVariant(x);
+        }
+      push(ms,new HeapVariant(list));          
+      break;
+
+    case vm.opcode.p_getlocchildren:
+      auto loc = unpackLocation(vm, peek(ms));
+      HeapVariant[] list;
+      foreach(x;loc.children)
+        {
+          list ~= new HeapVariant(x);
+        }
+      push(ms,new HeapVariant(list));          
+      break;
+
+    case vm.opcode.getlocparent:
+      auto loc = unpackLocation(vm, pop(ms));
+      push(ms,new HeapVariant(loc.parent));
+      break;
+
+    case vm.opcode.p_getlocparent:
+      auto loc = unpackLocation(vm, peek(ms));
+      push(ms,new HeapVariant(loc.parent));
+
+      break;
+
+      // are these actually needed?
+      // case vm.opcode.adduni: // adds object on the stack to universe
+      //   auto o = pop(ms);
+      //   assert(o.peek!GameObject);
+      //   auto go = o.get!GameObject;
+      //   vm.universe.objects[go.id] = go;
+      //   break;
+
+      // case vm.opcode.deluni: // adds object on the stack to universe
+      //   auto o = pop(ms);
+      //   assert(o.peek!GameObject);
+      //   auto go = o.get!GameObject;
+      //   vm.universe.objects.remove(go.id);
+      //   break;
+                   
+    case vm.opcode.createlist:
+      HeapVariant[] newList;
+      push(ms, new HeapVariant(newList));
+      break;
+
+    case vm.opcode.appendlist: // appends top of stack to next stack (a list )
+      // val :: list
+      wdb("stack : ", ms.evalStack);
+      auto item = pop(ms);
+      wdb("item is = ", item);
+      auto list = pop(ms);
+      assert(list.peek!(HeapVariant[]));
+      wdb("appendlist ", item, " :: ", list);          
+      // we must peek here to get a pointer otherwise
+      // it will get copied
+      if( auto l = list.peek!(HeapVariant[]))
+        {
+          *l ~= item;
+        }
+      wdb("list now : ", (list.get!(HeapVariant[])));
+      break;
+
+    case vm.opcode.p_appendlist: // appends top of stack to next stack (a list )
+      // val :: list
+      wdb("stack : ", ms.evalStack);
+      auto item = pop(ms);
+      wdb("item is = ", item);
+      auto list = peek(ms);
+      assert(list.peek!(HeapVariant[]));
+      wdb("appendlist ", item, " :: ", list);          
+      // we must peek here to get a pointer otherwise
+      // it will get copied
+      if( auto l = list.peek!(HeapVariant[]))
+        {
+          *l ~= item;
+        }
+      wdb("list now : ", (list.get!(HeapVariant[])));
+      break;
+          
+                  
+    case vm.opcode.removelist: //  creates a new list removing keys
+      // val :: list
+      wdb("removelist");
+      wdb("stack : ", ms.evalStack);
+      auto key = pop(ms);
+      wdb("item is = ", key.var);
+      auto list = pop(ms);
+      assert(list.peek!(HeapVariant[]));
+
+      HeapVariant[] newList;
+      if( auto l = list.peek!(HeapVariant[]))
+        {
+          foreach(i; *l)
+            {
+              wdb("testing if ", i, "!= ", key.var);
+              if(i.var != key.var)
+                {
+                  newList ~= i;
+                }
+            }
+        }
+
+      wdb("list on stack now : ");
+      foreach(l;newList)
+        {
+          wdb(l.var);
+        }
+
+      push(ms, new HeapVariant(newList));
+      break;
+
+    case vm.opcode.p_removelist: //  creates a new list removing keys
+      // val :: list
+      wdb("removelist");
+      wdb("stack : ", ms.evalStack);
+      auto key = pop(ms);
+      wdb("item is = ", key.var);
+      auto list = peek(ms);
+      assert(list.peek!(HeapVariant[]));
+
+      HeapVariant[] newList;
+      if( auto l = list.peek!(HeapVariant[]))
+        {
+          foreach(i; *l)
+            {
+              wdb("testing if ", i, "!= ", key.var);
+              if(i.var != key.var)
+                {
+                  newList ~= i;
+                }
+            }
+        }
+
+      wdb("list on stack now : ");
+      foreach(l;newList)
+        {
+          wdb(l.var);
+        }
+          
+      push(ms, new HeapVariant(newList));
+      break;
+          
+    case vm.opcode.index:
+      wdb("listindex ",ms.evalStack);
+      auto index = pop(ms);
+      auto list = pop(ms);
+      wdb(list.var);
+      assert(list.peek!(HeapVariant[]));
+      auto i = index.get!int;
+      if(auto listt = list.peek!(HeapVariant[]))
+        {
+          wdb("listindex ", (*listt), " ", index.var);
+          push(ms,(*listt)[i]);
+
+        }
+
+      break;
+
+    case vm.opcode.p_index:
+      wdb("listindex ",ms.evalStack);
+      auto index = pop(ms);
+      auto list = peek(ms);
+      wdb(list.var);
+      assert(list.peek!(HeapVariant[]));
+      auto i = index.get!int;
+      if(auto listt = list.peek!(HeapVariant[]))
+        {
+          wdb("listindex ", (*listt), " ", index.var);
+          push(ms,(*listt)[i]);
+
+        }
+
+      break;
+
+    case vm.opcode.keys:
+      wdb("keys");
+      auto ptr = pop(ms);
+      HeapVariant[string] aa;
+      if(ptr.peek!(HeapVariant[string]))
+        {
+          aa = ptr.get!(HeapVariant[string]);
+        }
+      else if(ptr.peek!GameObject)
+        {
+          auto go = ptr.get!GameObject;
+          aa = go.props;
+        }
+      else
+        {
+          assert(false, "values only supports HeapVaraint[] and GameObject");
+        }
+      HeapVariant[] keys;          
+      foreach(k;aa.keys)
+        {
+          keys ~= new HeapVariant(k);
+        }
+
+      push(ms,new HeapVariant(keys));  
+      break;
+
+    case vm.opcode.values:
+      wdb("values");
+      auto ptr = pop(ms);
+      HeapVariant[string] aa;
+      if(ptr.peek!(HeapVariant[string]))
+        {
+          aa = ptr.get!(HeapVariant[string]);
+        }
+      else if(ptr.peek!GameObject)
+        {
+          auto go = ptr.get!GameObject;
+          aa = go.props;
+        }
+      else
+        {
+          assert(false, "values only supports HeapVaraint[] and GameObject");
+        }
+      HeapVariant[] values;                    
+      foreach(v;aa.values)
+        {
+          values ~= new HeapVariant(v);
+        }
+
+      push(ms,new HeapVariant(values));  
+      break;
+          
+    case vm.opcode.len:
+      auto list = pop(ms);          
+      wdb("!! ", list.var);
+      assert(list.peek!(HeapVariant[]));
+      auto l = list.peek!(HeapVariant[]);
+      auto len =(*l).length;
+      push(ms,new HeapVariant(cast(int)len));
+      wdb("listlen ", list, " ", len);
+      break;
+
+    case vm.opcode.p_len:
+      auto list = peek(ms);
+      assert(list.peek!(HeapVariant[]));
+      auto l = list.peek!(HeapVariant[]);
+      auto len =(*l).length;
+      push(ms,new HeapVariant(cast(int)len));
+      wdb("listlen ", list, " ", cast(int)len);
+      break;
+
+
+    case vm.opcode.genreq: // string -> request on stack
+      auto title = pop(ms);
+      assert(title.peek!string);
+      wdb("genreq ", title);
+      auto r = new Request();
+      r.title = title.get!string;
+      push(ms, new HeapVariant(r));      
+      break;
+
+    case vm.opcode.addaction: // variant :: string :: request
+      auto vals = pop2(ms);
+      auto reqv = pop(ms);
+      //assert(vals[0].peek!int);
+      assert(vals[1].peek!string);
+      assert(reqv.peek!Request);
+      auto req = reqv.get!Request;
+      wdb("addaction ", vals[0], vals[1], " : ", req.actions);
+      req.actions ~= tuple(vals[0].get!string, vals[1].get!string);
+      break;
+
+    case vm.opcode.say: // message :: client
+      wdb("val stack ", ms.evalStack[0].var, " ", ms.evalStack[1].var);
+      auto msg = pop(ms);
+      assert(msg.peek!string);
+      auto client = pop(ms);
+      assert(client.peek!string);
+      auto clientid = client.get!string;
+      auto cm =
+        ClientMessage
+        (clientid,
+         MessageType.Data,
+         format("{\"type\":\"chat\",\"id\":\"%s\",\"msg\":\"[server] %s\"}",
+                clientid, msg.get!string));
+      writeln("sending say  message to client ", clientid, " " , cm);
+      vm.zmqThread.send(cm);
+
+      break;
+    case vm.opcode.suspend: // clientid :: req
+      // the first thing we do is copy this entire machine status
+      writeln("suspendu at ", vm.CurrentMachine.pc);
+      vm.machines ~= *vm.CurrentMachine;
+      auto newMs = vm.CurrentMachine;
+      auto key = pop(newMs);
+      assert(key.peek!string);        
+      auto clientid = key.get!string;
+      auto reqv = pop(newMs);
+      assert(reqv.peek!Request);
+      auto req = reqv.get!Request;
+      string[string] availChoices;
+      auto json = toRequestJson(vm, req.title, req.actions, vm.machines.length > 2);
+      foreach(x;req.actions)
+        {
+          availChoices[x[0]]=x[1];
+        }
+
+      if(vm.machines.length > 2)
+        {
+          availChoices["__UNDO__"] = "";
+        }
+      newMs.validChoices = availChoices;      
+      auto cm =
+        ClientMessage
+        (clientid,
+         MessageType.Data,
+         json);
+      newMs.waitingMessage = new HeapVariant(cm);
+      writeln("sending suspend message to client ", clientid, " " , cm);
+      vm.zmqThread.send(cm);
+      return true; //wait = Waiting.WaitRequested;
+
+    case vm.opcode.cut:
+      // chop the machine stack
+      auto current = vm.CurrentMachine;
+      vm.machines = [*current];      
+      break;
+      
+    // case vm.opcode.suspend: // clientid :: req
+    //   // a normal suspends marks the end of a chain.
+    //   // in this case we splat the machine stack and
+    //   // continue from here.
+    //   auto current = vm.CurrentMachine;
+    //   vm.machines = [*current];
+    //   auto newMs = vm.CurrentMachine;
+    //   auto key = pop(newMs);
+    //   assert(key.peek!string);        
+    //   auto clientid = key.get!string;
+    //   auto reqv = pop(newMs);
+    //   assert(reqv.peek!Request);
+    //   auto req = reqv.get!Request;
+    //   string[string] availChoices;
+    //   auto json = toRequestJson(vm, req.title, req.actions, vm.machines.length > 1);
+    //   foreach(x;req.actions)
+    //     {
+    //       availChoices[x[0]]=x[1];
+    //     }      
+    //   newMs.validChoices = availChoices;      
+    //   auto cm =
+    //     ClientMessage
+    //     (clientid,
+    //      MessageType.Data,
+    //      json);      
+    //   newMs.waitingMessage = new HeapVariant(cm);
+    //   writeln("sending suspend message to client ", clientid, " " , cm);
+    //   vm.zmqThread.send(cm);
+    //   return true; //wait = Waiting.WaitRequested;
+
+    case vm.opcode.call:
+      auto address = readInt(ms,vm);
+      wdb("call ", address);
+      wdb("pc is currenlty ", ms.pc);
+      StackFrame sf;
+      sf.returnAddress = ms.pc;
+      ms.callStack ~= sf;
+      ms.pc += (address - 5);
+      break;
+          
+    case vm.opcode.ret:
+      wdb("ret");
+      if(ms.callStack.length > 1)
+        {
+          ms.pc = ms.callStack[$-1].returnAddress;
+          wdb("pc now ", ms.pc, " call stack length ", ms.callStack.length);
+          ms.callStack = ms.callStack[0..$-1];
+          wdb("pc now ", ms.pc, " call stack length ", ms.callStack.length);
+        }
+      else
+        {
+          wdb("end of main function");
+          vm.finished = true;
+          return true;
+        }
+            
+      break;
+    case vm.opcode.dbg:
+      write(pop(ms).var);
+      break;
+    case vm.opcode.dbgl:
+      writeln(pop(ms).var);
+      break;
+
+    default:
+      wdb("unknown opcode ", ins);
+      assert(0);
+    }
+
+  return false;  
 }
 
-void handleResponse(MachineStatus* ms, VM* vm, string client, JSONValue response)
+bool handleResponse(VM* vm, string client, JSONValue response)
 {
-  
   writeln("in handle response : ", client, " ", response["id"]);
-  if(response["id"].type() == JSON_TYPE.INTEGER)
+  writeln("count ", vm.machines.length);
+  if(!vm.CurrentMachine.waitingMessage.peek!ClientMessage)
     {
-        wdb("in handle response int");
-      push(ms, new HeapVariant(cast(int)response["id"].integer));
+      writeln("waiting message was null");
+      writeln("recieved response from unexpected client ", client, "! ignoring ...", response);
+      return false;
     }
-  else if(response["id"].type() == JSON_TYPE.STRING)
+  ClientMessage cm = vm.CurrentMachine.waitingMessage.get!ClientMessage;
+  writeln("avail choices ", vm.CurrentMachine.validChoices);
+  if(cm.client != client)
     {
-        wdb("in handle response str");
-      push(ms, new HeapVariant(cast(string)response["id"].str));
+      writeln("recieved response from unexpected client ", client, "! ignoring ...", response);
+      return false;
     }
   else
     {
-      wdb("in handle response fail");      
-      assert(false, "unsuppored key type in json response");
+       if(response["id"].type() == JSON_TYPE.STRING)
+        {
+          wdb("in handle response str");
+          auto id = cast(string)response["id"].str;
+          if(id !in vm.CurrentMachine.validChoices)
+            {
+              writeln("recieved an invalid response ", id, " from client ", client);
+              return false;
+            }
+          else if(id == "__UNDO__")
+            {
+              //revert back to previous machine and continue
+              writeln("falling back ... current machine count ", vm.machines.length);
+              vm.machines = vm.machines[0..$-2];
+              writeln("now ", vm.machines.length);
+              writeln("pc now ", vm.CurrentMachine.pc);
+              vm.CurrentMachine.pc --;
+              return true;
+            }
+            else
+            {
+              push(vm.CurrentMachine, new HeapVariant(id));
+              return true;
+            }                            
+        }
+      else
+        {
+          writeln("received non string response back from client ", client);
+          return false;
+        }
     }
-
-  
-
-  //todo: assert reposnse is valid and expected
-  // set the response of a resuming core
-  
-  //cr.currentFrame.locals[index] = response;
 }
 
 
@@ -1546,7 +1745,7 @@ unittest  {
   readProgram(s,outprog,entry, raw );
   
   //read bytecode fie
-  vm.machines[0] = MachineStatus();
+  vm.machines ~= MachineStatus();
   wdb("entry point : ", entry);
   vm.machines[0].pc = entry;
   vm.program = outprog;
@@ -1574,33 +1773,33 @@ unittest  {
   }
 }
 
-unittest {
-  VM vm = new VM();
-  setupTest(&vm);
-  while(vm.machines[0].pc < vm.program.length && !vm.finished )
-    {
-      if(step(&vm.machines[0],&vm))
-        {
-          if(!vm.finished)
-            {
-              JSONValue j;
-              j["id"]="pyramid-card";
-              handleResponse(&vm.machines[0], &vm, "A", j);
-            }
-        }
-    }
-  writeln("suspended or finished");
-  writeln("Locations count ", vm.universe.locations.length);
-  // foreach(l;vm.universe.locations)
-  //   {
-  //     writeln(l.key);
-  //   }
+// unittest {
+//   VM vm = new VM();
+//   setupTest(&vm);
+//   while(vm.machines[0].pc < vm.program.length && !vm.finished )
+//     {
+//       if(step(&vm))
+//         {
+//           if(!vm.finished)
+//             {
+//               JSONValue j;
+//               j["id"]="pyramid-card";
+//               handleResponse(&vm, "A", j);
+//             }
+//         }
+//     }
+//   writeln("suspended or finished");
+//   writeln("Locations count ", vm.universe.locations.length);
+//   // foreach(l;vm.universe.locations)
+//   //   {
+//   //     writeln(l.key);
+//   //   }
     
   
-}
+//  }
 
 
-// unittest {
+//  unittest {
 //   import std.traits;
 //   import std.algorithm;
 //   auto ops = EnumMembers!(VM.opcode);

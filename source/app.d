@@ -18,7 +18,7 @@ void Server(Tid parentId)
   int entry = 0;
   readProgram(vm.strings,vm.program,entry, raw );
 
-  vm.machines[0] = MachineStatus();
+  vm.machines ~= MachineStatus();
   writeln("program loaded: ", vm.program);
   vm.machines[0].callStack ~= StackFrame();
   vm.lastHeart = MonoTime.currTime;
@@ -63,7 +63,7 @@ void Server(Tid parentId)
                             {
                               writeln(players);
                               writeln("game starting..");
-                              while(!step(&vm.machines[0],&vm) && !vm.finished)
+                              while(!step(&vm) && !vm.finished)
                                 {
                                   //                                  writeln("executing instruction..");
                                 }
@@ -99,6 +99,7 @@ void Server(Tid parentId)
                             {
                               foreach(kvp; vm.players.byKeyValue)
                                 {
+                                  
                                   auto cm =
                                     ClientMessage
                                     (kvp.key,
@@ -136,12 +137,12 @@ void Server(Tid parentId)
                           break;
                         case "response":
                           wdb("handling ...");
-                          handleResponse(&vm.machines[0],&vm,message.client,j);
-      
-
-                          while(!step(&vm.machines[0],&vm))
+                          if(handleResponse(&vm,message.client,j))
                             {
-                              //                              writeln("executing instruction..");
+                              while(!step(&vm))
+                                {
+                                  //                              writeln("executing instruction..");
+                                }
                             }
                           // writeln("local vars:");
                           //writeln(vm.machines[0].currentFrame.locals);
@@ -192,7 +193,7 @@ void main()
   auto items = [
                 PollItem(server, PollFlags.pollIn),
                 ];
-
+  writeln("spawning server...");
   auto worker = spawn(&Server, thisTid);
     
   // Switch messages between sockets
