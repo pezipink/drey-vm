@@ -1,5 +1,5 @@
 module vm;
-const dbg =true;
+const dbg = false;
 import core.time;
 import std.stdio;
 import std.typecons;
@@ -29,7 +29,6 @@ class HeapVariant
     return var.toString;
   }
 }
-
 enum MessageType
   {
     Connect = 0x1,
@@ -180,6 +179,7 @@ class VM
       stvar,
       p_stvar,
       ldprop, // accept game obect or location ref
+      p_ldprop,
       stprop,
       p_stprop,
       hasprop,
@@ -479,7 +479,58 @@ void moveObjectRec(VM* vm, Location targetLoc, GameObject obj)
       targetLoc.objects[go.id] = obj;
     }
 }
+void ldprop(MachineStatus* ms, string name, HeapVariant obj)
+{
+  HeapVariant result;
+  if(obj.peek!GameObject)
+    {
+      auto prop = (obj.get!GameObject()).props[name];
+      if(prop.peek!HeapVariant)
+        {
+          result = prop;
+        }
+      else
+        {
+          result = new HeapVariant(prop);
+        }              
+    }
+  else if(obj.peek!Location)
+    {
+      auto loc = obj.peek!Location;
+      auto prop = loc.props[name];
+              
+      if(is(prop == prop.peek!HeapVariant))
+        {
+                  
+          result = prop.get!HeapVariant;
+        }
+      else
+        {
 
+          result = new HeapVariant(prop);
+        }  
+    }
+  else if(obj.peek!LocationReference)
+    {
+      auto loc = obj.peek!LocationReference;
+      auto prop = loc.props[name];
+      if(is(prop == HeapVariant))
+        {
+          result = prop;
+        }
+      else
+        {
+          result = new HeapVariant(prop);
+        }  
+    }
+  else
+    {
+      assert(false, "ldprop only accepts GameObject and LocationReference");
+    }
+
+  push(ms,result);      
+
+}
 void stprop(string name, HeapVariant obj, HeapVariant val)
 {
   if(obj.peek!GameObject)
@@ -503,6 +554,40 @@ void stprop(string name, HeapVariant obj, HeapVariant val)
     {
       assert(false, "stprop only supports GameObject and LocationReference");
     }
+}
+
+void hasprop(MachineStatus* ms, string key, HeapVariant obj)
+{
+  if(obj.peek!GameObject)
+    {
+      push(ms, new HeapVariant((key in (obj.get!GameObject()).props) != null));
+    }
+  //else if (obj.peek!Location)
+  // {
+  //   auto lref = obj.get!Location;
+  //   auto key = name.get!string;
+  //   if(is(val == HeapVariant))
+  //     {
+  //       lref.props[key] = val;
+  //     }
+  //   else
+  //     {
+  //       lref.props[key] = new HeapVariant(val);
+  //     }
+
+              
+  // }
+  else if (obj.peek!LocationReference)
+    {
+      auto lref = obj.get!LocationReference;
+      push(ms,new HeapVariant((key in lref.props) != null));
+
+    }
+  else
+    {
+      assert(false, "hasprop only supports GameObject and LocationReference");
+    }
+
 }
 
 bool step(MachineStatus* ms, VM* vm)
@@ -578,56 +663,14 @@ bool step(MachineStatus* ms, VM* vm)
           auto name = pop(ms);
           assert(name.peek!string);
           auto obj = pop(ms);
-          HeapVariant result;
-          if(obj.peek!GameObject)
-            {
-              auto prop = (obj.get!GameObject()).props[name.get!string()];
-              if(prop.peek!HeapVariant)
-                {
-                  result = prop;
-                }
-              else
-                {
-                  result = new HeapVariant(prop);
-                }              
-            }
-          else if(obj.peek!Location)
-            {
-              auto loc = obj.peek!Location;
-              auto prop = loc.props[name.get!string()];
-              
-              if(is(prop == prop.peek!HeapVariant))
-                {
-                  
-                  result = prop.get!HeapVariant;
-                }
-              else
-                {
+          ldprop(ms,name.get!string,obj);
+          break;
 
-                  result = new HeapVariant(prop);
-                }  
-            }
-          else if(obj.peek!LocationReference)
-            {
-              auto loc = obj.peek!LocationReference;
-              auto prop = loc.props[name.get!string()];
-              if(is(prop == HeapVariant))
-                {
-                  result = prop;
-                }
-              else
-                {
-                  result = new HeapVariant(prop);
-                }  
-            }
-          else
-            {
-              assert(false, "ldprop only accepts GameObject and LocationReference");
-            }
-
-
-          wdb("ldprop ", name.var , " : ", result.var);
-          push(ms,result);      
+        case vm.opcode.p_ldprop: // propname, obj          
+          auto name = pop(ms);
+          assert(name.peek!string);
+          auto obj = peek(ms);
+          ldprop(ms,name.get!string,obj);
           break;
 
         case vm.opcode.hasprop:
@@ -635,36 +678,17 @@ bool step(MachineStatus* ms, VM* vm)
           assert(name.peek!string);
           auto key = name.get!string;
           auto obj = pop(ms);
-          if(obj.peek!GameObject)
-            {
-              push(ms, new HeapVariant((key in (obj.get!GameObject()).props) != null));
-            }
-          //else if (obj.peek!Location)
-            // {
-            //   auto lref = obj.get!Location;
-            //   auto key = name.get!string;
-            //   if(is(val == HeapVariant))
-            //     {
-            //       lref.props[key] = val;
-            //     }
-            //   else
-            //     {
-            //       lref.props[key] = new HeapVariant(val);
-            //     }
-
-              
-            // }
-          else if (obj.peek!LocationReference)
-            {
-              auto lref = obj.get!LocationReference;
-              push(ms,new HeapVariant((key in lref.props) != null));
-
-            }
-          else
-            {
-              assert(false, "stprop only supports GameObject and LocationReference");
-            }
+          hasprop(ms,key,obj);
           break;
+
+        case vm.opcode.p_hasprop:
+          auto name = pop(ms);
+          assert(name.peek!string);
+          auto key = name.get!string;
+          auto obj = peek(ms);
+          hasprop(ms,key,obj);
+          break;
+                    
         case vm.opcode.stprop: // val :: key :: obj
           auto val = pop(ms);
           auto name = pop(ms);
@@ -965,8 +989,15 @@ bool step(MachineStatus* ms, VM* vm)
           auto locPair = unpackLocations(vm, refs[0], refs[1]); 
           r.key = locPair[0].key;
           locPair[1].siblings ~= r;
-          //          writeln(locPair[1].key, " sibs now", locPair[1].siblings);
-
+          // writeln(locPair[1].key, " sibs now", locPair[1].siblings);
+          // foreach(s; locPair[1].siblings)
+          //   {
+          //     writeln(locPair[1].key, " => ", s.key);
+          //     foreach(p;s.props.byKeyValue)
+          //       {
+          //         writeln("\t", p.key, " => ", p.value);
+          //       }
+          //   }
           
           break;
 
@@ -1553,7 +1584,7 @@ unittest {
           if(!vm.finished)
             {
               JSONValue j;
-              j["id"]="a";
+              j["id"]="pyramid-card";
               handleResponse(&vm.machines[0], &vm, "A", j);
             }
         }
