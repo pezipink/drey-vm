@@ -34,7 +34,9 @@ enum MessageType
   {
     Connect = 0x1,
     Heartbeat = 0x2,
-    Data  = 0x3,    
+    Data  = 0x3,
+    Status = 0x4,
+    Universe = 0x5
   }
 
 
@@ -73,7 +75,8 @@ class GameObject
 
 class LocationReference
 {
-  string key;
+  int id;
+  string key;  
   HeapVariant[string] props;
   override string toString()
   {
@@ -135,6 +138,7 @@ class Stack : GameObject
 class GameUniverse
 {
   GameObject[int] objects;
+  LocationReference[int] locationReferences;  
   Location[string] locations;
   int maxId;
 }
@@ -391,7 +395,124 @@ int readInt(MachineStatus* cr, const VM* vm)
   return res;
 }
 
-string toRequestJson(VM* vm, string header, Tuple!(string,string)[] pairs, bool includeUndo )
+JSONValue serialize(HeapVariant var)
+{
+
+ if(var.peek!string)
+   {
+     return JSONValue(var.get!string);
+   }
+ else if(var.peek!int)
+   {
+     return JSONValue(var.get!int);
+   }
+ else if(var.peek!GameObject)
+   {
+     auto go = var.get!GameObject;
+     return JSONValue(go.toReference);
+   }
+ else if(var.peek!Location)
+   {
+     auto loc = var.get!Location;
+     return JSONValue(loc.toReference);
+   }
+ else if(auto arr = var.peek!(HeapVariant[]))
+   {
+     JSONValue[] res;
+     foreach(x;*arr)
+       {
+         res ~= serialize(x);              
+       }
+     return JSONValue(res);
+     assert(false,"not supported yet");
+   }
+ assert(0);
+
+}
+JSONValue serialize(GameObject go)
+{
+  JSONValue js;  
+  js["id"] = go.id;
+  JSONValue props;
+  foreach(p;go.props.byKeyValue)
+    {
+      js[p.key] = serialize(p.value); // todo :arrays
+    }
+  js["props"] = props;
+  return js;
+}
+JSONValue serialize(Location loc)
+{
+  JSONValue js;  
+  js["key"] = loc.key;
+  JSONValue props;
+  foreach(p;loc.props.byKeyValue)
+    {
+      js[p.key] = serialize(p.value); // todo :arrays
+    }
+  js["props"] = props;
+  return js;
+}
+
+string toReference(GameObject go)
+{
+  return format("{%s}",go.id);
+}
+string toReference(Location loc)
+{
+  return format("{%s}",loc.key);
+}
+
+void AnnounceDelta(VM* vm, string op, Tuple!(string,Variant)[] pairs, string visibility)
+{
+  JSONValue js;
+  js["type"] = op;
+  
+  foreach(p;pairs)
+    {
+      if(p[1].peek!string)
+        {
+          js.object[p[0]]=p[1].get!string;
+        }
+      else if(p[1].peek!int)
+       {
+          js.object[p[0]]=p[1].get!int;
+        }
+      else if(p[1].peek!GameObject)
+        {
+          auto r = serialize(p[1].get!GameObject);
+          js.object[p[0]]=r;
+        }
+      else if(p[1].peek!Location)
+        {
+          auto r = serialize(p[1].get!Location);
+          js.object[p[0]]=r;
+        }
+      else if(auto arr = p[1].peek!(HeapVariant[]))
+        {
+          //todo: tidy this up
+          js.object[p[0]]= serialize(new HeapVariant(p[1]));
+        }
+      else
+        {
+          assert(0, format("unsupported type %s", p[1]));
+        }          
+    }
+  
+  foreach(p;vm.players)
+    {
+      auto go = p.get!GameObject;
+      //todo: only send to clients based on vis      
+      auto cm =
+        ClientMessage
+        (go.props["clientid"].get!string,
+         MessageType.Data,
+         js.toString);
+      vm.zmqThread.send(cm);
+    }
+}
+
+string toRequestJson(VM* vm,string header, Tuple!(string,string)[] pairs, bool includeUndo )
 {
   JSONValue js;
   js["type"] = "request";  
@@ -460,7 +581,8 @@ void moveObjectRec(VM* vm, Location targetLoc, GameObject obj)
   if(obj.id !in vm.universe.objects)
     {
       wdb("adding ", obj.id, " to universe");
-      vm.universe.objects[obj.id] = obj;
+      vm.universe.objects[obj.id] = obj;      
+      AnnounceDelta(vm,"adduni",[tuple("obj",Variant(obj))],"");
     }
           
   //remove from current location
@@ -473,20 +595,35 @@ void moveObjectRec(VM* vm, Location targetLoc, GameObject obj)
   obj.locationKey = targetLoc.key;
   targetLoc.objects[obj.id] = obj;
 
+  AnnounceDelta(vm,"moveobj",[tuple("obj",Variant(obj.id)),
+                              tuple("loc",Variant(targetLoc.key))],"");
+
   // we must move all objects contained within this as well
   auto toProcess = getGameObjects(obj.props);
 
   foreach(go;toProcess)
     {
+      if(go.id !in vm.universe.objects)
+        {
+          wdb("adding ", go.id, " to universe");
+          vm.universe.objects[go.id] = go;      
+          AnnounceDelta(vm,"adduni",[tuple("obj",Variant(go))],"");       
+        }
+
       if(go.locationKey != null && go.locationKey != "")
         {
           auto currentLocation = vm.universe.locations[obj.locationKey];
           currentLocation.objects.remove(obj.id);              
         }
+      
       go.locationKey = targetLoc.key;
       targetLoc.objects[go.id] = obj;
+      AnnounceDelta(vm,"moveobj",[tuple("obj",Variant(go.id)),
+                                  tuple("loc",Variant(targetLoc.key))],"");
+
     }
 }
+
 void ldprop(MachineStatus* ms, string name, HeapVariant obj)
 {
   HeapVariant result;
@@ -509,12 +646,10 @@ void ldprop(MachineStatus* ms, string name, HeapVariant obj)
               
       if(is(prop == prop.peek!HeapVariant))
         {
-                  
           result = prop.get!HeapVariant;
         }
       else
         {
-
           result = new HeapVariant(prop);
         }  
     }
@@ -539,30 +674,43 @@ void ldprop(MachineStatus* ms, string name, HeapVariant obj)
   push(ms,result);      
 
 }
-void stprop(string name, HeapVariant obj, HeapVariant val)
+
+void stprop(VM* vm, string name, HeapVariant obj, HeapVariant val)
 {
   if(obj.peek!GameObject)
     {
-      (obj.get!GameObject()).props[name] = val;
+      auto go = obj.get!GameObject;
+      go.props[name] = val;
+      if(go.id != -1)
+        {
+          AnnounceDelta(vm, "stpropg", [tuple("id",Variant(go.id)),
+                                        tuple("key",Variant(name)),
+                                        tuple("value",val.var)], "");
+        }
     }
   else if (obj.peek!Location)
     {
       auto lref = obj.get!Location;
-      
-          lref.props[name] = val;
+      lref.props[name] = val;
+      AnnounceDelta(vm, "stpropl", [tuple("id",Variant(lref.key)),
+                                    tuple("key",Variant(name)),
+                                    tuple("value",val.var)], "");
       
     }
   else if (obj.peek!LocationReference)
     {
       auto lref = obj.get!LocationReference;
-                lref.props[name] = val;
-      
+      lref.props[name] = val;
+      AnnounceDelta(vm, "stproplref", [tuple("id",Variant(lref.id)),
+                                       tuple("key",Variant(name)),
+                                       tuple("value",val.var)], "");
     }
   else
     {
       assert(false, "stprop only supports GameObject and LocationReference");
     }
 }
+
 void indexOf(MachineStatus* ms, string key, HeapVariant obj)
 {
   // later we can support arrays here, for now just strings
@@ -613,10 +761,11 @@ void contains(MachineStatus* ms, string key, HeapVariant obj)
             }
         }
 
-
+  
     }
   //else if (obj.peek!Location)
   // {
+  
   //   auto lref = obj.get!Location;
   //   auto key = name.get!string;
   //   if(is(val == HeapVariant))
@@ -656,23 +805,23 @@ bool step(VM* vm)
     case vm.opcode.pop:
       pop(ms);
       break;
-          
-    case vm.opcode.ldval:
+           
+   case vm.opcode.ldval:
       auto val = readInt(ms,vm);
-      wdb("ldval ", val);
+      //wdb("ldval ", val);
       push(ms,new HeapVariant(val));
       break;
 
     case vm.opcode.ldvals:
       auto s = getString(ms,vm);
-      wdb("ldvals ", s);
+      //wdb("ldvals ", s);
       push(ms,new HeapVariant(s));
-      wdb("stack  ", ms.evalStack);
+      //wdb("stack  ", ms.evalStack);
       break;
 
     case vm.opcode.ldvalb:
       int b = readInt(ms,vm);
-      wdb("ldvalb ", b!=0);
+      //wdb("ldvalb ", b!=0);
       push(ms,new HeapVariant(b!=0));
       break;
       
@@ -684,12 +833,12 @@ bool step(VM* vm)
 
       if(index in ms.currentFrame.locals)
         {
-          wdb("ldvar local ", index, " : ", ms.currentFrame.locals[index].var);
+          //wdb("ldvar local ", index, " : ", ms.currentFrame.locals[index].var);
           push(ms,ms.currentFrame.locals[index]);
         }
       else if(ms.callStack.length > 1 && index in ms.callStack[0].locals)
         {
-          wdb("ldvar global ", index, " : ", ms.callStack[0].locals[index].var);
+          //wdb("ldvar global ", index, " : ", ms.callStack[0].locals[index].var);
           push(ms,ms.callStack[0].locals[index]);
         }
       else
@@ -702,14 +851,14 @@ bool step(VM* vm)
     case vm.opcode.stvar: // str
       auto index = getString(ms,vm);
       auto val = pop(ms);
-      wdb("stvar ", index, " = ", val.var);
+      //wdb("stvar ", index, " = ", val.var);
       ms.currentFrame.locals[index]=val;
       break;
 
     case vm.opcode.p_stvar: // str
       auto index = getString(ms,vm);
       auto val = peek(ms);
-      wdb("stvar ", index, " = ", val.var);
+      //wdb("stvar ", index, " = ", val.var);
       ms.currentFrame.locals[index]=val;
       break;
 
@@ -731,20 +880,20 @@ bool step(VM* vm)
       auto val = pop(ms);
       auto name = pop(ms);
       auto obj = pop(ms);
-      stprop(name.get!string,obj,val);
+      stprop(vm, name.get!string,obj,val);
+
       break;
 
     case vm.opcode.p_stprop: // val :: key :: obj
       auto val = pop(ms);
       auto name = pop(ms);
       auto obj = peek(ms);
-      stprop(name.get!string,obj,val);
-      //todo: announce
+      stprop(vm, name.get!string,obj,val);
       break;
            
     case vm.opcode.add: 
       auto res = pop2(ms);
-      wdb("add ", res);
+      //wdb("add ", res);
       if(res[0].peek!string && res[1].peek!string)
         {
           // for the moment allow simple "adding" of strings
@@ -763,25 +912,25 @@ bool step(VM* vm)
 
     case vm.opcode.sub: 
       auto res = pop2(ms);
-      wdb("sub ", res[0]," ", res[1]);
+      //wdb("sub ", res[0]," ", res[1]);
       push(ms,new HeapVariant(res[0] - res[1]));
       break;
 
     case vm.opcode.mul: 
       auto res = pop2(ms);
-      wdb("mul ", res);
+      //wdb("mul ", res);
       push(ms,new HeapVariant(res[0] * res[1]));      
       break;
 
     case vm.opcode.div:
       auto res = pop2(ms);
-      wdb("quot ", res);
+      //wdb("quot ", res);
       push(ms,new HeapVariant(res[0] + res[1]));      
       break;
 
     case vm.opcode.mod:
       auto res = pop2(ms);
-      wdb("mod ", res);
+      //wdb("mod ", res);
       push(ms,new HeapVariant(res[0] % res[1]));      
       break;
 
@@ -789,7 +938,7 @@ bool step(VM* vm)
       auto vals = pop2(ms);
       assert(vals[0].peek!int);
       assert(vals[1].peek!int);
-      wdb("rndi ", vals);
+      //wdb("rndi ", vals);
       push(ms, new HeapVariant(uniform(vals[0].get!int,vals[1].get!int)));
       break;          
 
@@ -891,26 +1040,26 @@ bool step(VM* vm)
 
     case vm.opcode.ceq:
       auto vals = pop2(ms);
-      wdb("ceq ", vals[0].var, " == ", vals[1].var              );
+      //wdb("ceq ", vals[0].var, " == ", vals[1].var              );
       push(ms, new HeapVariant(vals[0].var == vals[1].var));
       break;
 
     case vm.opcode.cne:
       auto vals = pop2(ms);
-      wdb("cne ", vals);
+      //wdb("cne ", vals);
       push(ms, new HeapVariant(vals[0].var != vals[1].var));
       break;
 
     case vm.opcode.clt:
       auto vals = pop2(ms);
-      wdb("clt ", vals);
-      wdb("clt ", vals[0].var, " == ", vals[1].var              );
+      //wdb("clt ", vals);
+      //wdb("clt ", vals[0].var, " == ", vals[1].var              );
       push(ms, new HeapVariant(vals[0].var < vals[1].var));
       break;
 
     case vm.opcode.cgt:
       auto vals = pop2(ms);
-      wdb("cgt ", vals);
+      //wdb("cgt ", vals);
       push(ms, new HeapVariant(vals[0].var > vals[1].var));
       break;
 
@@ -920,7 +1069,7 @@ bool step(VM* vm)
 
       if(vals[0].var == vals[1].var)
         {
-          wdb("beq ", vals, " : ", address);
+          //wdb("beq ", vals, " : ", address);
           ms.pc += address - 5;
         }
       break;
@@ -928,21 +1077,21 @@ bool step(VM* vm)
     case vm.opcode.bne: // address vals
       auto address = readInt(ms,vm);
       auto vals = pop2(ms);
-      wdb("bne ", vals[0].var, " ", vals[1].var, " : ", address);
+      //wdb("bne ", vals[0].var, " ", vals[1].var, " : ", address);
       if(vals[0].var != vals[1].var)
         {
-          wdb("pc was ", ms.pc);
+          //wdb("pc was ", ms.pc);
           // - 5 because 4 are the address itself
           // and 1 to comensate for the ++ at the step start
           ms.pc += (address - 5);
-          wdb("now ", ms.pc);
+          //wdb("now ", ms.pc);
         }
       break;
 
     case vm.opcode.bgt: // address vals
       auto address =readInt(ms, vm);
       auto vals = pop2(ms);
-      wdb("bgt ", vals, " : ", address);
+      //wdb("bgt ", vals, " : ", address);
       if(vals[0].var > vals[1].var)
         {
           ms.pc += address - 5;
@@ -953,7 +1102,7 @@ bool step(VM* vm)
       //BACON LETTUCE TOMATO
       auto address = readInt(ms,vm);
       auto vals = pop2(ms);
-      wdb("blt ", vals, " : ", address);
+      //wdb("blt ", vals, " : ", address);
       if(vals[0].var < vals[1].var)
         {
           ms.pc += address - 5;
@@ -963,7 +1112,6 @@ bool step(VM* vm)
     case vm.opcode.branch: // address
       auto address = readInt(ms,vm);
       ms.pc += address - 5;
-
       break;
 
     case vm.opcode.createobj:
@@ -973,13 +1121,10 @@ bool step(VM* vm)
       break;
 
     case vm.opcode.moveobj:
-      wdb("stack : ", ms.evalStack);
+      //wdb("stack : ", ms.evalStack);
       auto loc = unpackLocation(vm,pop(ms));
       auto obj = pop(ms).get!GameObject;
-
-      moveObjectRec(vm, loc, obj);
-
-      //TODO: ANnounce
+      moveObjectRec(vm, loc, obj);      
       break;
 
                     
@@ -999,7 +1144,7 @@ bool step(VM* vm)
           // since they will be pointers
           obj.props[kvp.key]=kvp.value;
         }
-      wdb("cloneobj ", id, " -> ", newObj.id);
+      //wdb("cloneobj ", id, " -> ", newObj.id);
       //vm.universe.objects[newObj.id] = newObj;      
       push(ms,new HeapVariant(newObj));
       //todo: announce
@@ -1008,7 +1153,7 @@ bool step(VM* vm)
     case vm.opcode.getobj: // id -> obj on stack
       auto id = pop(ms);
       assert(id.peek!int);
-      wdb("getobj ", id);
+      //wdb("getobj ", id);
       push(ms, new HeapVariant(vm.universe.objects[id.get!int]));
       break;
 
@@ -1025,7 +1170,7 @@ bool step(VM* vm)
 
     case vm.opcode.getloc: // name -> location on stack
       auto loc = pop(ms);
-      wdb("getloc ", loc);
+      //wdb("getloc ", loc);
       string key;
       if(loc.peek!string)
         {
@@ -1062,9 +1207,13 @@ bool step(VM* vm)
       auto objv = pop(ms);
       assert(objv.peek!GameObject);
       auto obj = objv.get!GameObject;
-      wdb("delprop ", key.get!string, " : ", obj.id);
+      //wdb("delprop ", key.get!string, " : ", obj.id);
       obj.props.remove(key.get!string);
-      //todo: announce
+      if(obj.id in vm.universe.objects)
+        {
+          AnnounceDelta(vm, "delprop",[tuple("obj",Variant(obj.id)),
+                                       tuple("key",Variant(key))], "");
+        }
       break;
 
     case vm.opcode.p_delprop: // key obj
@@ -1073,9 +1222,13 @@ bool step(VM* vm)
       auto objv = peek(ms);
       assert(objv.peek!GameObject);
       auto obj = objv.get!GameObject;
-      wdb("delprop ", key.get!string, " : ", obj.id);
+      //wdb("delprop ", key.get!string, " : ", obj.id);
       obj.props.remove(key.get!string);
-      //todo: announce
+      if(obj.id in vm.universe.objects)
+        {
+          AnnounceDelta(vm, "delprop",[tuple("obj",Variant(obj.id)),
+                                       tuple("key",Variant(key))], "");
+        }
       break;
 
     case vm.opcode.setvis: // str obj
@@ -1084,7 +1237,7 @@ bool step(VM* vm)
       auto objv = pop(ms);
       assert(objv.peek!GameObject);
       auto obj = objv.get!GameObject;
-      wdb("setvis ", str.get!string, " : ", obj.id);
+      //wdb("setvis ", str.get!string, " : ", obj.id);
       obj.visibility=str.get!string;
       //todo: announce
       break;
@@ -1095,7 +1248,7 @@ bool step(VM* vm)
       auto objv = peek(ms);
       assert(objv.peek!GameObject);
       auto obj = objv.get!GameObject;
-      wdb("p_setvis ", str.get!string, " : ", obj.id);
+      //wdb("p_setvis ", str.get!string, " : ", obj.id);
       obj.visibility=str.get!string;
       //todo: announce
       break;
@@ -1108,12 +1261,16 @@ bool step(VM* vm)
       loc.key = name.get!string;
       vm.universe.locations[name.get!string] = loc;
       push(ms,new HeapVariant(loc));
-      wdb("universe location count now ", vm.universe.locations.length);
-      //todo: announce
+      //wdb("universe location count now ", vm.universe.locations.length);
+      AnnounceDelta(vm, "genloc",[tuple("key",Variant(loc.key))], "");
       break;
 
     case vm.opcode.genlocref:
-      push(ms, new HeapVariant(new LocationReference));
+      auto loc = new LocationReference();
+      loc.id = vm.universe.maxId++;
+      vm.universe.locationReferences[loc.id] = loc;
+      push(ms, new HeapVariant(loc));
+      AnnounceDelta(vm, "genlocref",[tuple("key",Variant(loc.key))], "");
       break;
           
     case vm.opcode.setlocsibling:
@@ -1123,16 +1280,8 @@ bool step(VM* vm)
       auto locPair = unpackLocations(vm, refs[0], refs[1]); 
       r.key = locPair[0].key;
       locPair[1].siblings ~= r;
-      // writeln(locPair[1].key, " sibs now", locPair[1].siblings);
-      // foreach(s; locPair[1].siblings)
-      //   {
-      //     writeln(locPair[1].key, " => ", s.key);
-      //     foreach(p;s.props.byKeyValue)
-      //       {
-      //         writeln("\t", p.key, " => ", p.value);
-      //       }
-      //   }
-          
+      AnnounceDelta(vm, "setlocsibling",[tuple("loc",Variant(locPair[1].key)),
+                                         tuple("locref",Variant(r.key))], "");
       break;
 
     case vm.opcode.p_setlocsibling:
@@ -1141,22 +1290,24 @@ bool step(VM* vm)
       auto rel = unpackLocation(vm, pop(ms));
       auto host = unpackLocation(vm, peek(ms));
       r.key = rel.key;
-      host.siblings ~= r;          
+      host.siblings ~= r;
+      AnnounceDelta(vm, "setlocsibling",[tuple("loc",Variant(host.key)),
+                                         tuple("locref",Variant(r.key))], "");
       break;
 
-    case vm.opcode.setlocparent:
-      // (childlocref :: parent :: child)  both can either be a Location or a key                    
+    case vm.opcode.setlocparent:      // (childlocref :: parent :: child)  both can either be a Location or a key                    
       auto r = pop(ms).get!LocationReference;
       auto refs = pop2(ms);
       auto locPair = unpackLocations(vm, refs[0], refs[1]);
-
       // link parent to child
       r.key = locPair[0].key;
       locPair[0].children ~= r;          
       // link parent to child
       auto r2 = new LocationReference();
       r2.key = locPair[0].key;
-      locPair[1].parent = r2;          
+      locPair[1].parent = r2;
+      AnnounceDelta(vm, "setlocparent",[tuple("parent",Variant(locPair[0].key)),
+                                         tuple("locref",Variant(r.key))], "");
       break;
 
     case vm.opcode.p_setlocparent:
@@ -1172,6 +1323,9 @@ bool step(VM* vm)
       auto r2 = new LocationReference();
       r2.key = parent.key;
       child.parent = r2;          
+      AnnounceDelta(vm, "setlocparent",[tuple("parent",Variant(parent.key)),
+                                         tuple("locref",Variant(r.key))], "");
+
       break;
 
     case vm.opcode.setlocchild:
@@ -1186,7 +1340,10 @@ bool step(VM* vm)
       // link child to parent
       auto r2 = new LocationReference();
       r2.key = parent.key;
-      child.parent = r2;          
+      child.parent = r2;
+      AnnounceDelta(vm, "setlocparent",[tuple("child",Variant(child.key)),
+                                        tuple("locref",Variant(r.key))], "");
+
       break;
 
     case vm.opcode.p_setlocchild:
@@ -1201,7 +1358,10 @@ bool step(VM* vm)
       // link child to parent
       auto r2 = new LocationReference();
       r2.key = parent.key;
-      child.parent = r2;          
+      child.parent = r2;
+      AnnounceDelta(vm, "setlocparent",[tuple("child",Variant(child.key)),
+                                        tuple("locref",Variant(r.key))], "");
+
       break;
 
     case vm.opcode.getlocsiblings:
@@ -1277,45 +1437,45 @@ bool step(VM* vm)
 
     case vm.opcode.appendlist: // appends top of stack to next stack (a list )
       // val :: list
-      wdb("stack : ", ms.evalStack);
+      //wdb("stack : ", ms.evalStack);
       auto item = pop(ms);
-      wdb("item is = ", item);
+      //wdb("item is = ", item);
       auto list = pop(ms);
       assert(list.peek!(HeapVariant[]));
-      wdb("appendlist ", item, " :: ", list);          
+      //wdb("appendlist ", item, " :: ", list);          
       // we must peek here to get a pointer otherwise
       // it will get copied
       if( auto l = list.peek!(HeapVariant[]))
         {
           *l ~= item;
         }
-      wdb("list now : ", (list.get!(HeapVariant[])));
+      //wdb("list now : ", (list.get!(HeapVariant[])));
       break;
 
     case vm.opcode.p_appendlist: // appends top of stack to next stack (a list )
       // val :: list
-      wdb("stack : ", ms.evalStack);
+      //wdb("stack : ", ms.evalStack);
       auto item = pop(ms);
-      wdb("item is = ", item);
+      //wdb("item is = ", item);
       auto list = peek(ms);
       assert(list.peek!(HeapVariant[]));
-      wdb("appendlist ", item, " :: ", list);          
+      //wdb("appendlist ", item, " :: ", list);          
       // we must peek here to get a pointer otherwise
       // it will get copied
       if( auto l = list.peek!(HeapVariant[]))
         {
           *l ~= item;
         }
-      wdb("list now : ", (list.get!(HeapVariant[])));
+      //wdb("list now : ", (list.get!(HeapVariant[])));
       break;
           
                   
     case vm.opcode.removelist: //  creates a new list removing keys
       // val :: list
-      wdb("removelist");
-      wdb("stack : ", ms.evalStack);
+      //wdb("removelist");
+      //wdb("stack : ", ms.evalStack);
       auto key = pop(ms);
-      wdb("item is = ", key.var);
+      //wdb("item is = ", key.var);
       auto list = pop(ms);
       assert(list.peek!(HeapVariant[]));
 
@@ -1332,7 +1492,7 @@ bool step(VM* vm)
             }
         }
 
-      wdb("list on stack now : ");
+      //wdb("list on stack now : ");
       foreach(l;newList)
         {
           wdb(l.var);
@@ -1343,10 +1503,10 @@ bool step(VM* vm)
 
     case vm.opcode.p_removelist: //  creates a new list removing keys
       // val :: list
-      wdb("removelist");
-      wdb("stack : ", ms.evalStack);
+      //wdb("removelist");
+      //wdb("stack : ", ms.evalStack);
       auto key = pop(ms);
-      wdb("item is = ", key.var);
+      //wdb("item is = ", key.var);
       auto list = peek(ms);
       assert(list.peek!(HeapVariant[]));
 
@@ -1355,7 +1515,7 @@ bool step(VM* vm)
         {
           foreach(i; *l)
             {
-              wdb("testing if ", i, "!= ", key.var);
+              //wdb("testing if ", i, "!= ", key.var);
               if(i.var != key.var)
                 {
                   newList ~= i;
@@ -1363,7 +1523,7 @@ bool step(VM* vm)
             }
         }
 
-      wdb("list on stack now : ");
+      //wdb("list on stack now : ");
       foreach(l;newList)
         {
           wdb(l.var);
@@ -1373,39 +1533,38 @@ bool step(VM* vm)
       break;
           
     case vm.opcode.index:
-      wdb("listindex ",ms.evalStack);
+      //wdb("listindex ",ms.evalStack);
       auto index = pop(ms);
       auto list = pop(ms);
-      wdb(list.var);
+      //wdb(list.var);
       assert(list.peek!(HeapVariant[]));
       auto i = index.get!int;
       if(auto listt = list.peek!(HeapVariant[]))
         {
-          wdb("listindex ", (*listt), " ", index.var);
-          push(ms,(*listt)[i]);
+          //wdb("listindex ", (*listt), " ", index.var); 
+         push(ms,(*listt)[i]);
 
         }
 
       break;
 
     case vm.opcode.p_index:
-      wdb("listindex ",ms.evalStack);
+      //wdb("listindex ",ms.evalStack);
       auto index = pop(ms);
       auto list = peek(ms);
-      wdb(list.var);
+      //wdb(list.var);
       assert(list.peek!(HeapVariant[]));
       auto i = index.get!int;
       if(auto listt = list.peek!(HeapVariant[]))
         {
-          wdb("listindex ", (*listt), " ", index.var);
+          //wdb("listindex ", (*listt), " ", index.var);
           push(ms,(*listt)[i]);
-
         }
 
       break;
 
     case vm.opcode.keys:
-      wdb("keys");
+      //wdb("keys");
       auto ptr = pop(ms);
       HeapVariant[string] aa;
       if(ptr.peek!(HeapVariant[string]))
@@ -1431,7 +1590,7 @@ bool step(VM* vm)
       break;
 
     case vm.opcode.values:
-      wdb("values");
+      //wdb("values");
       auto ptr = pop(ms);
       HeapVariant[string] aa;
       if(ptr.peek!(HeapVariant[string]))
@@ -1463,7 +1622,7 @@ bool step(VM* vm)
       auto l = list.peek!(HeapVariant[]);
       auto len =(*l).length;
       push(ms,new HeapVariant(cast(int)len));
-      wdb("listlen ", list, " ", len);
+      //wdb("listlen ", list, " ", len);
       break;
 
     case vm.opcode.p_len:
@@ -1472,14 +1631,14 @@ bool step(VM* vm)
       auto l = list.peek!(HeapVariant[]);
       auto len =(*l).length;
       push(ms,new HeapVariant(cast(int)len));
-      wdb("listlen ", list, " ", cast(int)len);
+      //wdb("listlen ", list, " ", cast(int)len);
       break;
 
 
     case vm.opcode.genreq: // string -> request on stack
       auto title = pop(ms);
       assert(title.peek!string);
-      wdb("genreq ", title);
+      //wdb("genreq ", title);
       auto r = new Request();
       r.title = title.get!string;
       push(ms, new HeapVariant(r));      
@@ -1492,7 +1651,7 @@ bool step(VM* vm)
       assert(vals[1].peek!string);
       assert(reqv.peek!Request);
       auto req = reqv.get!Request;
-      wdb("addaction ", vals[0], vals[1], " : ", req.actions);
+      // wdb("addaction ", vals[0], vals[1], " : ", req.actions);
       req.actions ~= tuple(vals[0].get!string, vals[1].get!string);
       break;
 
@@ -1509,13 +1668,13 @@ bool step(VM* vm)
          MessageType.Data,
          format("{\"type\":\"chat\",\"id\":\"%s\",\"msg\":\"[server] %s\"}",
                 clientid, msg.get!string));
-      writeln("sending say  message to client ", clientid, " " , cm);
+      //  writeln("sending say  message to client ", clientid, " " , cm);
       vm.zmqThread.send(cm);
 
       break;
     case vm.opcode.suspend: // clientid :: req
       // the first thing we do is copy this entire machine status
-      writeln("suspendu at ", vm.CurrentMachine.pc);
+      //      writeln("suspendu at ", vm.CurrentMachine.pc);
       vm.machines ~= *vm.CurrentMachine;
       auto newMs = vm.CurrentMachine;
       auto key = pop(newMs);
@@ -1552,40 +1711,8 @@ bool step(VM* vm)
       vm.machines = [*current];      
       break;
       
-    // case vm.opcode.suspend: // clientid :: req
-    //   // a normal suspends marks the end of a chain.
-    //   // in this case we splat the machine stack and
-    //   // continue from here.
-    //   auto current = vm.CurrentMachine;
-    //   vm.machines = [*current];
-    //   auto newMs = vm.CurrentMachine;
-    //   auto key = pop(newMs);
-    //   assert(key.peek!string);        
-    //   auto clientid = key.get!string;
-    //   auto reqv = pop(newMs);
-    //   assert(reqv.peek!Request);
-    //   auto req = reqv.get!Request;
-    //   string[string] availChoices;
-    //   auto json = toRequestJson(vm, req.title, req.actions, vm.machines.length > 1);
-    //   foreach(x;req.actions)
-    //     {
-    //       availChoices[x[0]]=x[1];
-    //     }      
-    //   newMs.validChoices = availChoices;      
-    //   auto cm =
-    //     ClientMessage
-    //     (clientid,
-    //      MessageType.Data,
-    //      json);      
-    //   newMs.waitingMessage = new HeapVariant(cm);
-    //   writeln("sending suspend message to client ", clientid, " " , cm);
-    //   vm.zmqThread.send(cm);
-    //   return true; //wait = Waiting.WaitRequested;
-
     case vm.opcode.call:
       auto address = readInt(ms,vm);
-      wdb("call ", address);
-      wdb("pc is currenlty ", ms.pc);
       StackFrame sf;
       sf.returnAddress = ms.pc;
       ms.callStack ~= sf;
@@ -1627,15 +1754,13 @@ bool step(VM* vm)
 bool handleResponse(VM* vm, string client, JSONValue response)
 {
   writeln("in handle response : ", client, " ", response["id"]);
-  writeln("count ", vm.machines.length);
-  if(!vm.CurrentMachine.waitingMessage.peek!ClientMessage)
+  if(vm.CurrentMachine.waitingMessage is null || !vm.CurrentMachine.waitingMessage.peek!ClientMessage)
     {
       writeln("waiting message was null");
       writeln("recieved response from unexpected client ", client, "! ignoring ...", response);
       return false;
     }
-  ClientMessage cm = vm.CurrentMachine.waitingMessage.get!ClientMessage;
-  writeln("avail choices ", vm.CurrentMachine.validChoices);
+  ClientMessage cm = vm.CurrentMachine.waitingMessage.get!ClientMessage;  
   if(cm.client != client)
     {
       writeln("recieved response from unexpected client ", client, "! ignoring ...", response);
@@ -1773,30 +1898,32 @@ unittest  {
   }
 }
 
-// unittest {
-//   VM vm = new VM();
-//   setupTest(&vm);
-//   while(vm.machines[0].pc < vm.program.length && !vm.finished )
-//     {
-//       if(step(&vm))
-//         {
-//           if(!vm.finished)
-//             {
-//               JSONValue j;
-//               j["id"]="pyramid-card";
-//               handleResponse(&vm, "A", j);
-//             }
-//         }
-//     }
-//   writeln("suspended or finished");
-//   writeln("Locations count ", vm.universe.locations.length);
-//   // foreach(l;vm.universe.locations)
-//   //   {
-//   //     writeln(l.key);
-//   //   }
+unittest {
+  VM vm = new VM();
+  setupTest(&vm);
+  while(vm.machines[0].pc < vm.program.length && !vm.finished )
+    {
+      if(step(&vm))
+        {
+          if(!vm.finished)
+            {
+              auto msg = vm.CurrentMachine.waitingMessage.get!ClientMessage;
+              JSONValue j;
+              j["id"]="pyramid-card";
+              //j["id"]="green-leg";
+              handleResponse(&vm, msg.client, j);
+            }
+        }
+    }
+  writeln("suspended or finished");
+  writeln("Locations count ", vm.universe.locations.length);
+  // foreach(l;vm.universe.locations)
+  //   {
+  //     writeln(l.key);
+  //   }
     
   
-//  }
+ }
 
 
 //  unittest {

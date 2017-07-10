@@ -1,3 +1,4 @@
+
 import std.stdio;
 import std.conv;
 import std.json;
@@ -87,6 +88,30 @@ void Server(Tid parentId)
                   send(parentId,message);
                   break;
                 }
+              case MessageType.Status:
+                {
+                  writeln("rcvd status request");
+                  // report the pening request if it is for this client
+                  if(vm.CurrentMachine.waitingMessage !is null && vm.CurrentMachine.waitingMessage.peek!ClientMessage)
+                    {
+                      ClientMessage cm = vm.CurrentMachine.waitingMessage.get!ClientMessage;
+                      if(cm.client == message.client)
+                        {
+                          send(parentId, cm);
+                        }
+                    }
+                  else
+                    {
+                      //todo: send a direct chat message to the requestor indicating either the server is busy
+                      //or waiting for a response form a certain player 
+                    }
+                  break;
+                }
+              case MessageType.Universe:
+                {
+                  writeln("rcbd universe request");
+                  break;
+                }
               case  MessageType.Data:
                 {
                   try
@@ -97,6 +122,7 @@ void Server(Tid parentId)
                         case "chat":
                           if(j["id"].str == "")
                             {
+                              writeln(" got chat message ", message.json);
                               foreach(kvp; vm.players.byKeyValue)
                                 {
                                   
@@ -105,7 +131,7 @@ void Server(Tid parentId)
                                     (kvp.key,
                                      MessageType.Data,
                                      format("{\"type\":\"chat\",\"id\":\"%s\",\"msg\":\"[all][%s] %s\"}",
-                                            kvp.key, kvp.key, message.json));
+                                            kvp.key, kvp.key, j["msg"].str));
                                   parentId.send(cm);
                                 }
                             }
@@ -119,8 +145,8 @@ void Server(Tid parentId)
                                     (id,
                                      MessageType.Data,
                                      format("{\"type\":\"chat\",\"id\":\"%s\",\"msg\":\"[%s] %s\"}",
-                                            id, id, message.json));
-                                  //writeln("individual message ", cm);
+                                            id, id, j["msg"].str));
+                                  //writeln("individualmessage ", cm);
                                   parentId.send(cm);
                                 }
                               else
@@ -143,6 +169,10 @@ void Server(Tid parentId)
                                 {
                                   //                              writeln("executing instruction..");
                                 }
+                            }
+                          else
+                            {
+                              writeln("continuing ...");
                             }
                           // writeln("local vars:");
                           //writeln(vm.machines[0].currentFrame.locals);
@@ -186,7 +216,9 @@ void Server(Tid parentId)
 void main()
 {
   // Prepare our context and sockets
+  writeln( "start");
   auto server = Socket(SocketType.router);
+  writeln("bdining socket");
   server.bind("tcp://*:5560");
 
   // Initialize poll set
@@ -211,7 +243,7 @@ void main()
           if(msg.type == MessageType.Data)
             {
               server.send(data,true);
-              writeln("sending json ", msg.json);
+              //writeln("sending json ", msg.json);
               server.send(msg.json);
             }
           else
