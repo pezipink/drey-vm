@@ -438,19 +438,16 @@ JSONValue serialize(GameObject go)
     {
       js[p.key] = serialize(p.value); // todo :arrays
     }
-  js["props"] = props;
   return js;
 }
 JSONValue serialize(Location loc)
 {
   JSONValue js;  
   js["key"] = loc.key;
-  JSONValue props;
   foreach(p;loc.props.byKeyValue)
     {
       js[p.key] = serialize(p.value); // todo :arrays
     }
-  js["props"] = props;
   return js;
 }
 
@@ -466,7 +463,7 @@ string toReference(Location loc)
 void AnnounceDelta(VM* vm, string op, Tuple!(string,Variant)[] pairs, string visibility)
 {
   JSONValue js;
-  js["type"] = op;
+  js["t"] = op;
   
   foreach(p;pairs)
     {
@@ -515,7 +512,7 @@ void AnnounceDelta(VM* vm, string op, Tuple!(string,Variant)[] pairs, string vis
 string toRequestJson(VM* vm,string header, Tuple!(string,string)[] pairs, bool includeUndo )
 {
   JSONValue js;
-  js["type"] = "request";  
+  js["t"] = "request";  
   js["header"] = header;
   JSONValue[] choices;
 
@@ -582,7 +579,7 @@ void moveObjectRec(VM* vm, Location targetLoc, GameObject obj)
     {
       wdb("adding ", obj.id, " to universe");
       vm.universe.objects[obj.id] = obj;      
-      AnnounceDelta(vm,"adduni",[tuple("obj",Variant(obj))],"");
+      AnnounceDelta(vm,"aui",[tuple("o",Variant(obj))],"");
     }
           
   //remove from current location
@@ -595,8 +592,8 @@ void moveObjectRec(VM* vm, Location targetLoc, GameObject obj)
   obj.locationKey = targetLoc.key;
   targetLoc.objects[obj.id] = obj;
 
-  AnnounceDelta(vm,"moveobj",[tuple("obj",Variant(obj.id)),
-                              tuple("loc",Variant(targetLoc.key))],"");
+  AnnounceDelta(vm,"mo",[tuple("o",Variant(obj.id)),
+                         tuple("l",Variant(targetLoc.key))],"");
 
   // we must move all objects contained within this as well
   auto toProcess = getGameObjects(obj.props);
@@ -607,7 +604,7 @@ void moveObjectRec(VM* vm, Location targetLoc, GameObject obj)
         {
           wdb("adding ", go.id, " to universe");
           vm.universe.objects[go.id] = go;      
-          AnnounceDelta(vm,"adduni",[tuple("obj",Variant(go))],"");       
+          AnnounceDelta(vm,"aui",[tuple("o",Variant(go))],"");       
         }
 
       if(go.locationKey != null && go.locationKey != "")
@@ -618,9 +615,8 @@ void moveObjectRec(VM* vm, Location targetLoc, GameObject obj)
       
       go.locationKey = targetLoc.key;
       targetLoc.objects[go.id] = obj;
-      AnnounceDelta(vm,"moveobj",[tuple("obj",Variant(go.id)),
-                                  tuple("loc",Variant(targetLoc.key))],"");
-
+      AnnounceDelta(vm,"mo",[tuple("o",Variant(go.id)),
+                             tuple("l",Variant(targetLoc.key))],"");
     }
 }
 
@@ -675,35 +671,56 @@ void ldprop(MachineStatus* ms, string name, HeapVariant obj)
 
 }
 
+void ensureObjectsAnnounced(VM* vm, HeapVariant val)
+{
+  if(auto go = val.peek!GameObject)
+    {
+      if(go.id !in vm.universe.objects)
+        {
+          writeln("annoucenke");
+          vm.universe.objects[go.id] = *go;
+          AnnounceDelta(vm,"aui",[tuple("o",Variant(*go))],"");       
+        }
+    }
+  else if(auto arr = val.peek!(HeapVariant[]))
+    {
+      foreach(x;*arr)
+        {
+          ensureObjectsAnnounced(vm, x);
+        }
+    }
+}
 void stprop(VM* vm, string name, HeapVariant obj, HeapVariant val)
 {
+  ensureObjectsAnnounced(vm,val);
   if(obj.peek!GameObject)
     {
       auto go = obj.get!GameObject;
+      
       go.props[name] = val;
-      if(go.id != -1)
+      if(go.id != -1 && go.id in vm.universe.objects)
         {
-          AnnounceDelta(vm, "stpropg", [tuple("id",Variant(go.id)),
-                                        tuple("key",Variant(name)),
-                                        tuple("value",val.var)], "");
+          AnnounceDelta(vm, "spg", [tuple("i",Variant(go.id)),
+                                    tuple("k",Variant(name)),
+                                    tuple("v",val.var)], "");
         }
     }
   else if (obj.peek!Location)
     {
       auto lref = obj.get!Location;
       lref.props[name] = val;
-      AnnounceDelta(vm, "stpropl", [tuple("id",Variant(lref.key)),
-                                    tuple("key",Variant(name)),
-                                    tuple("value",val.var)], "");
+      AnnounceDelta(vm, "spl", [tuple("i",Variant(lref.key)),
+                                tuple("k",Variant(name)),
+                                tuple("v",val.var)], "");
       
     }
   else if (obj.peek!LocationReference)
     {
       auto lref = obj.get!LocationReference;
       lref.props[name] = val;
-      AnnounceDelta(vm, "stproplref", [tuple("id",Variant(lref.id)),
-                                       tuple("key",Variant(name)),
-                                       tuple("value",val.var)], "");
+      AnnounceDelta(vm, "splr", [tuple("i",Variant(lref.id)),
+                                 tuple("k",Variant(name)),
+                                 tuple("v",val.var)], "");
     }
   else
     {
@@ -743,8 +760,8 @@ void contains(MachineStatus* ms, string key, HeapVariant obj)
       push(ms, new HeapVariant((key in (obj.get!GameObject()).props) != null));
     }
   else if(obj.peek!string)
-    {
-      auto val = obj.get!string;
+    { 
+     auto val = obj.get!string;
       import std.string : indexOf;
       push(ms, new HeapVariant(val.indexOf(key) > -1));
     }
@@ -1211,8 +1228,8 @@ bool step(VM* vm)
       obj.props.remove(key.get!string);
       if(obj.id in vm.universe.objects)
         {
-          AnnounceDelta(vm, "delprop",[tuple("obj",Variant(obj.id)),
-                                       tuple("key",Variant(key))], "");
+          AnnounceDelta(vm, "dp",[tuple("o",Variant(obj.id)),
+                                  tuple("k",Variant(key))], "");
         }
       break;
 
@@ -1226,8 +1243,8 @@ bool step(VM* vm)
       obj.props.remove(key.get!string);
       if(obj.id in vm.universe.objects)
         {
-          AnnounceDelta(vm, "delprop",[tuple("obj",Variant(obj.id)),
-                                       tuple("key",Variant(key))], "");
+          AnnounceDelta(vm, "dp",[tuple("o",Variant(obj.id)),
+                                  tuple("k",Variant(key))], "");
         }
       break;
 
@@ -1262,7 +1279,7 @@ bool step(VM* vm)
       vm.universe.locations[name.get!string] = loc;
       push(ms,new HeapVariant(loc));
       //wdb("universe location count now ", vm.universe.locations.length);
-      AnnounceDelta(vm, "genloc",[tuple("key",Variant(loc.key))], "");
+      AnnounceDelta(vm, "gl",[tuple("k",Variant(loc.key))], "");
       break;
 
     case vm.opcode.genlocref:
@@ -1270,7 +1287,7 @@ bool step(VM* vm)
       loc.id = vm.universe.maxId++;
       vm.universe.locationReferences[loc.id] = loc;
       push(ms, new HeapVariant(loc));
-      AnnounceDelta(vm, "genlocref",[tuple("key",Variant(loc.key))], "");
+      AnnounceDelta(vm, "glr",[tuple("l",Variant(loc.id))], "");
       break;
           
     case vm.opcode.setlocsibling:
@@ -1279,9 +1296,12 @@ bool step(VM* vm)
       auto refs = pop2(ms);
       auto locPair = unpackLocations(vm, refs[0], refs[1]); 
       r.key = locPair[0].key;
+      AnnounceDelta(vm, "slrk",[tuple("i",Variant(r.id)),
+                                tuple("k",Variant(r.key))], "");
+
       locPair[1].siblings ~= r;
-      AnnounceDelta(vm, "setlocsibling",[tuple("loc",Variant(locPair[1].key)),
-                                         tuple("locref",Variant(r.key))], "");
+      AnnounceDelta(vm, "sls",[tuple("l",Variant(locPair[1].key)),
+                               tuple("lr",Variant(r.id))], "");
       break;
 
     case vm.opcode.p_setlocsibling:
@@ -1290,24 +1310,38 @@ bool step(VM* vm)
       auto rel = unpackLocation(vm, pop(ms));
       auto host = unpackLocation(vm, peek(ms));
       r.key = rel.key;
+      AnnounceDelta(vm, "slrk",[tuple("i",Variant(r.id)),
+                                tuple("k",Variant(r.key))], "");
+
       host.siblings ~= r;
-      AnnounceDelta(vm, "setlocsibling",[tuple("loc",Variant(host.key)),
-                                         tuple("locref",Variant(r.key))], "");
+      AnnounceDelta(vm, "sls",[tuple("l",Variant(host.key)),
+                               tuple("lr",Variant(r.id))], "");
       break;
 
-    case vm.opcode.setlocparent:      // (childlocref :: parent :: child)  both can either be a Location or a key                    
+    case vm.opcode.setlocparent:      // (childlocref :: parent :: child)  both can either be a Location or a key     
       auto r = pop(ms).get!LocationReference;
       auto refs = pop2(ms);
       auto locPair = unpackLocations(vm, refs[0], refs[1]);
       // link parent to child
       r.key = locPair[0].key;
-      locPair[0].children ~= r;          
+      AnnounceDelta(vm, "slrk",[tuple("i",Variant(r.id)),
+                               tuple("k",Variant(r.key))], "");
+     
+      locPair[0].children ~= r;
+      AnnounceDelta(vm, "slp",[tuple("p",Variant(locPair[0].key)),
+                               tuple("lr",Variant(r.id))], "");
+
       // link parent to child
       auto r2 = new LocationReference();
+      r2.id = vm.universe.maxId++;
+      AnnounceDelta(vm, "glr",[tuple("l",Variant(r2.id))],"");                                    
       r2.key = locPair[0].key;
+      AnnounceDelta(vm, "slrk",[tuple("i",Variant(r2.id)),
+                                tuple("k",Variant(r2.key))], "");
+
       locPair[1].parent = r2;
-      AnnounceDelta(vm, "setlocparent",[tuple("parent",Variant(locPair[0].key)),
-                                         tuple("locref",Variant(r.key))], "");
+      AnnounceDelta(vm, "slc",[tuple("c",Variant(locPair[1].key)),
+                               tuple("lr",Variant(r2.id))], "");
       break;
 
     case vm.opcode.p_setlocparent:
@@ -1318,13 +1352,23 @@ bool step(VM* vm)
 
       // link parent to child
       r.key = child.key;
+      AnnounceDelta(vm, "slrk",[tuple("i",Variant(r.id)),
+                                tuple("k",Variant(r.key))], "");
+
+      AnnounceDelta(vm, "slc",[tuple("c",Variant(child.key)),
+                               tuple("lr",Variant(r.id))], "");
+      
       parent.children ~= r;          
       // link child to parent
       auto r2 = new LocationReference();
+      AnnounceDelta(vm, "glr",[tuple("l",Variant(r2.id))],"");                                    
       r2.key = parent.key;
+      AnnounceDelta(vm, "slrk",[tuple("i",Variant(r2.id)),
+                                tuple("k",Variant(r2.key))], "");
+
       child.parent = r2;          
-      AnnounceDelta(vm, "setlocparent",[tuple("parent",Variant(parent.key)),
-                                         tuple("locref",Variant(r.key))], "");
+      AnnounceDelta(vm, "slp",[tuple("p",Variant(parent.key)),
+                               tuple("lr",Variant(r2.id))], "");
 
       break;
 
@@ -1336,13 +1380,22 @@ bool step(VM* vm)
 
       // link parent to child
       r.key = child.key;
-      parent.children ~= r;          
+      AnnounceDelta(vm, "slrk",[tuple("i",Variant(r.id)),
+                                tuple("k",Variant(r.key))], "");
+
+      parent.children ~= r;
+      AnnounceDelta(vm, "slp",[tuple("p",Variant(parent.key)),
+                               tuple("lr",Variant(r.id))], "");
+
       // link child to parent
       auto r2 = new LocationReference();
       r2.key = parent.key;
+      AnnounceDelta(vm, "slrk",[tuple("i",Variant(r2.id)),
+                                tuple("k",Variant(r2.key))], "");
+
       child.parent = r2;
-      AnnounceDelta(vm, "setlocparent",[tuple("child",Variant(child.key)),
-                                        tuple("locref",Variant(r.key))], "");
+      AnnounceDelta(vm, "slc",[tuple("c",Variant(child.key)),
+                               tuple("lr",Variant(r2.id))], "");
 
       break;
 
@@ -1354,13 +1407,22 @@ bool step(VM* vm)
 
       // link parent to child
       r.key = child.key;
-      parent.children ~= r;          
+      AnnounceDelta(vm, "slrk",[tuple("i",Variant(r.id)),
+                                tuple("k",Variant(r.key))], "");
+
+      parent.children ~= r;
+      AnnounceDelta(vm, "slp",[tuple("p",Variant(parent.key)),
+                               tuple("lr",Variant(r.id))], "");
+
       // link child to parent
       auto r2 = new LocationReference();
       r2.key = parent.key;
+      AnnounceDelta(vm, "slrk",[tuple("i",Variant(r2.id)),
+                                tuple("k",Variant(r2.key))], "");
+
       child.parent = r2;
-      AnnounceDelta(vm, "setlocparent",[tuple("child",Variant(child.key)),
-                                        tuple("locref",Variant(r.key))], "");
+      AnnounceDelta(vm, "slc",[tuple("c",Variant(child.key)),
+                               tuple("lr",Variant(r2.id))], "");
 
       break;
 
@@ -1414,21 +1476,22 @@ bool step(VM* vm)
       push(ms,new HeapVariant(loc.parent));
 
       break;
+ 
+    case vm.opcode.adduni: // adds object on the stack to universe
+      auto o = pop(ms);
+      assert(o.peek!GameObject);
+      auto go = o.get!GameObject;
+      vm.universe.objects[go.id] = go;
+      //todo:announce
+      break;
 
-      // are these actually needed?
-      // case vm.opcode.adduni: // adds object on the stack to universe
-      //   auto o = pop(ms);
-      //   assert(o.peek!GameObject);
-      //   auto go = o.get!GameObject;
-      //   vm.universe.objects[go.id] = go;
-      //   break;
-
-      // case vm.opcode.deluni: // adds object on the stack to universe
-      //   auto o = pop(ms);
-      //   assert(o.peek!GameObject);
-      //   auto go = o.get!GameObject;
-      //   vm.universe.objects.remove(go.id);
-      //   break;
+    case vm.opcode.deluni: // adds object on the stack to universe
+      auto o = pop(ms);
+      assert(o.peek!GameObject);
+      auto go = o.get!GameObject;
+      vm.universe.objects.remove(go.id);
+      //todo:announce
+      break;
                    
     case vm.opcode.createlist:
       HeapVariant[] newList;
@@ -1666,7 +1729,7 @@ bool step(VM* vm)
         ClientMessage
         (clientid,
          MessageType.Data,
-         format("{\"type\":\"chat\",\"id\":\"%s\",\"msg\":\"[server] %s\"}",
+         format("{\"t\":\"chat\",\"id\":\"%s\",\"msg\":\"[server] %s\"}",
                 clientid, msg.get!string));
       //  writeln("sending say  message to client ", clientid, " " , cm);
       vm.zmqThread.send(cm);

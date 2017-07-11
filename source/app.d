@@ -24,7 +24,7 @@ void Server(Tid parentId)
   vm.machines[0].callStack ~= StackFrame();
   vm.lastHeart = MonoTime.currTime;
   vm.zmqThread = parentId;
-  vm.requiredPlayers = 2;
+  vm.requiredPlayers = 1;
   vm.universe = new GameUniverse();
 
   GameObject state = new GameObject();
@@ -117,7 +117,7 @@ void Server(Tid parentId)
                   try
                     {
                       auto j = message.json.parseJSON;
-                      switch(j["type"].str)
+                      switch(j["t"].str)
                         {
                         case "chat":
                           if(j["id"].str == "")
@@ -130,7 +130,7 @@ void Server(Tid parentId)
                                     ClientMessage
                                     (kvp.key,
                                      MessageType.Data,
-                                     format("{\"type\":\"chat\",\"id\":\"%s\",\"msg\":\"[all][%s] %s\"}",
+                                     format("{\"t\":\"chat\",\"id\":\"%s\",\"msg\":\"[all][%s] %s\"}",
                                             kvp.key, kvp.key, j["msg"].str));
                                   parentId.send(cm);
                                 }
@@ -144,7 +144,7 @@ void Server(Tid parentId)
                                     ClientMessage
                                     (id,
                                      MessageType.Data,
-                                     format("{\"type\":\"chat\",\"id\":\"%s\",\"msg\":\"[%s] %s\"}",
+                                     format("{\"t\":\"chat\",\"id\":\"%s\",\"msg\":\"[%s] %s\"}",
                                             id, id, j["msg"].str));
                                   //writeln("individualmessage ", cm);
                                   parentId.send(cm);
@@ -156,7 +156,7 @@ void Server(Tid parentId)
                                     ClientMessage
                                     (message.client,
                                      MessageType.Data,
-                                     "{\"type\":\"chat\",\"id\":\"server\",\"msg\":\"No player exists with that name. \"}");                         
+                                     "{\"t\":\"chat\",\"id\":\"server\",\"msg\":\"No player exists with that name. \"}");                         
                                   parentId.send(cm);                              
                                 }
                             }
