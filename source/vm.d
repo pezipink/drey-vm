@@ -1,5 +1,5 @@
 module vm;
-const dbg = true;
+const dbg = false;
 import core.time;
 import std.stdio;
 import std.typecons;
@@ -827,6 +827,23 @@ void contains(MachineStatus* ms, string key, HeapVariant obj)
 
 }
 
+void locateVar(MachineStatus* ms, string index, Scope* currentScope)
+{
+  if(index in currentScope.locals)
+    {
+      //wdb("ldvar local ", index, " : ", ms.currentFrame.locals[index].var);
+      push(ms,currentScope.locals[index]);
+    }
+  else if(currentScope.closureScope !is null)
+   {
+     locateVar(ms, index, currentScope.closureScope);
+   }
+  else
+    {
+      assert(false, format("could not locate var %s", index));
+    }
+}
+
 bool step(VM* vm)
 {
   MachineStatus* ms = vm.CurrentMachine;
@@ -867,31 +884,7 @@ bool step(VM* vm)
       // frame locals or the global (bottom) frame
       auto index = getString(ms,vm);
       wdb("ldvar ", index);
-
-      //if(ms.currentFrame.closureScope !is null)
-        //writeln("! ", ms.currentFrame.closureScope.locals);
-      if(index in ms.currentFrame.locals)
-        {
-          //wdb("ldvar local ", index, " : ", ms.currentFrame.locals[index].var);
-          push(ms,ms.currentFrame.locals[index]);
-        }
-      else if(ms.currentFrame.closureScope !is null &&
-              index in ms.currentFrame.closureScope.locals)
-        {
-          push(ms,ms.scopes[$-1].closureScope.locals[index]);
-        }
-      else if(ms.currentFrame.closureScope !is null &&
-              ms.currentFrame.closureScope.closureScope !is null &&
-              index in ms.currentFrame.closureScope.closureScope.locals)
-        
-        {
-
-          push(ms,ms.currentFrame.closureScope.closureScope.locals[index]);
-        }
-      else
-        {
-          assert(0, format("variable %s was not found in current or global vars", index));
-        }
+      locateVar(ms, index, ms.currentFrame);      
       wdb("stack now ", ms.evalStack);
       break;
 
@@ -1544,7 +1537,7 @@ bool step(VM* vm)
         {
           *l ~= item;
         }
-      //wdb("list now : ", (list.get!(HeapVariant[])));
+      wdb("list now : ", (list.get!(HeapVariant[])));
       break;
 
     case vm.opcode.p_appendlist: // appends top of stack to next stack (a list )
@@ -1908,7 +1901,8 @@ bool step(VM* vm)
       write(pop(ms).var);
       break;
     case vm.opcode.dbgl:
-      writeln(pop(ms).var);
+      //write(MonoTime.currTime);
+      writeln(pop(ms).var);                  
       break;
 
     default:
