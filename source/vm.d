@@ -1,5 +1,5 @@
 module vm;
-const dbg = false;
+const dbg = true;
 import core.time;
 import std.stdio;
 import std.typecons;
@@ -276,7 +276,11 @@ class VM
       cut,
       say,
 
-      call,
+      pushscope,
+      popscope,
+      lambda,
+      apply,
+      p_apply,
       ret,
 
       dbg,  // prints to the console
@@ -333,21 +337,34 @@ class VM
   }
 }
 
-
-struct StackFrame
+struct Scope
 {
+  // this could be a "stack frame" (return address)
+  // a normal lexical scope (some loop)
+  // a "stack frame" might have a closure scope
   HeapVariant[string] locals;
   int returnAddress;
+  Scope* closureScope;
+  @property bool IsFunction() { return returnAddress != 0; }
+  
+}
+
+struct Function
+{
+  HeapVariant[] appliedArguments;
+  Scope* closureScope;
+  int totalArguments;
+  int functionAddress;
 }
 
 struct MachineStatus
 {
   int pc;
-  StackFrame[] callStack;
+  Scope[] scopes;
   HeapVariant[] evalStack;
   HeapVariant waitingMessage;
   string[string] validChoices;
-  @property StackFrame* currentFrame(){ return &callStack[$-1]; }
+  @property Scope* currentFrame(){ return &scopes[$-1]; }
 }
 
 void push(MachineStatus* cr, HeapVariant value)
@@ -539,6 +556,7 @@ string toRequestJson(VM* vm,string header, Tuple!(string,string)[] pairs, bool i
 string getString(MachineStatus* ms, VM* vm)
 {
   auto lookup = readInt(ms,vm);
+  //writeln(" !!! ", lookup);
   return vm.strings[lookup];
 }
 
@@ -677,7 +695,7 @@ void ensureObjectsAnnounced(VM* vm, HeapVariant val)
     {
       if(go.id !in vm.universe.objects)
         {
-          writeln("annoucenke");
+          //writeln("annoucenke");
           vm.universe.objects[go.id] = *go;
           AnnounceDelta(vm,"aui",[tuple("o",Variant(*go))],"");       
         }
@@ -816,7 +834,8 @@ bool step(VM* vm)
   //   {
       
   auto ins = cast(vm.opcode)readByte(ms,vm);
-  wdb("ins : ", ins);
+  wdb("ins ", ms.pc," : ", ins);
+  // wdb(ms.evalStack);
   switch(ins)
     {
     case vm.opcode.pop:
@@ -825,13 +844,13 @@ bool step(VM* vm)
            
    case vm.opcode.ldval:
       auto val = readInt(ms,vm);
-      //wdb("ldval ", val);
+      wdb("ldval ", val);
       push(ms,new HeapVariant(val));
       break;
 
     case vm.opcode.ldvals:
       auto s = getString(ms,vm);
-      //wdb("ldvals ", s);
+      wdb("ldvals ", s);
       push(ms,new HeapVariant(s));
       //wdb("stack  ", ms.evalStack);
       break;
@@ -847,36 +866,49 @@ bool step(VM* vm)
       // which is then looked up in the current stack
       // frame locals or the global (bottom) frame
       auto index = getString(ms,vm);
+      wdb("ldvar ", index);
 
+      //if(ms.currentFrame.closureScope !is null)
+        //writeln("! ", ms.currentFrame.closureScope.locals);
       if(index in ms.currentFrame.locals)
         {
           //wdb("ldvar local ", index, " : ", ms.currentFrame.locals[index].var);
           push(ms,ms.currentFrame.locals[index]);
         }
-      else if(ms.callStack.length > 1 && index in ms.callStack[0].locals)
+      else if(ms.currentFrame.closureScope !is null &&
+              index in ms.currentFrame.closureScope.locals)
         {
-          //wdb("ldvar global ", index, " : ", ms.callStack[0].locals[index].var);
-          push(ms,ms.callStack[0].locals[index]);
+          push(ms,ms.scopes[$-1].closureScope.locals[index]);
+        }
+      else if(ms.currentFrame.closureScope !is null &&
+              ms.currentFrame.closureScope.closureScope !is null &&
+              index in ms.currentFrame.closureScope.closureScope.locals)
+        
+        {
+
+          push(ms,ms.currentFrame.closureScope.closureScope.locals[index]);
         }
       else
         {
           assert(0, format("variable %s was not found in current or global vars", index));
         }
-
+      wdb("stack now ", ms.evalStack);
       break;
 
     case vm.opcode.stvar: // str
       auto index = getString(ms,vm);
       auto val = pop(ms);
-      //wdb("stvar ", index, " = ", val.var);
+      wdb("stvar ", index, " = ", val.var);
       ms.currentFrame.locals[index]=val;
+      wdb("stack now ", ms.evalStack);
       break;
 
     case vm.opcode.p_stvar: // str
       auto index = getString(ms,vm);
       auto val = peek(ms);
-      //wdb("stvar ", index, " = ", val.var);
+      wdb("p_stvar ", index, " = ", val.var);
       ms.currentFrame.locals[index]=val;
+      wdb("stack now ", ms.evalStack);
       break;
 
     case vm.opcode.ldprop: // propname, obj          
@@ -910,7 +942,7 @@ bool step(VM* vm)
            
     case vm.opcode.add: 
       auto res = pop2(ms);
-      //wdb("add ", res);
+      //writeln("add ", res);
       if(res[0].peek!string && res[1].peek!string)
         {
           // for the moment allow simple "adding" of strings
@@ -1773,23 +1805,96 @@ bool step(VM* vm)
       auto current = vm.CurrentMachine;
       vm.machines = [*current];      
       break;
-      
-    case vm.opcode.call:
-      auto address = readInt(ms,vm);
-      StackFrame sf;
-      sf.returnAddress = ms.pc;
-      ms.callStack ~= sf;
-      ms.pc += (address - 5);
+
+    case vm.opcode.pushscope:
+      vm.CurrentMachine.scopes ~= Scope();
       break;
+
+    case vm.opcode.popscope:
+      vm.CurrentMachine.scopes = vm.CurrentMachine.scopes[0..$-1];
+      break;
+      
+    case vm.opcode.lambda:
+      // lambda will be followed by the function location
+      // and the number of args it takes (int, byte)
+      int loc = readInt(ms,vm);
+      //writeln("location : ", loc);
+      //    int args = readByte(ms,vm);
+      //writeln("args : ", args);
+      Function f;
+      f.closureScope = &ms.scopes[$-1];
+      f.functionAddress = ms.pc + loc - 5;
+
+      push(ms, new HeapVariant(f));
+      wdb(ms.evalStack);
+      break;
+
+
+    case vm.opcode.apply:
+
+      auto arg = pop(ms);
+      auto fh = pop(ms);
+      if(auto f = fh.peek!Function)
+        {
+          wdb("exeucting function at", f.functionAddress, " args ", arg);
+          wdb("total args ", f.totalArguments, " applied ", f.appliedArguments);
+              Scope s;
+              s.closureScope = f.closureScope;
+              s.returnAddress = ms.pc;
+              ms.scopes ~= s;
+              push(ms,arg);                            
+              vm.CurrentMachine.pc = f.functionAddress;
+        }
+      else
+        {
           
+          assert(false,format("%s not a function value", fh));
+        }
+      
+      break;
+    case vm.opcode.p_apply:
+
+      auto arg = pop(ms);
+      auto fh = peek(ms);
+      if(auto f = fh.peek!Function)
+        {
+          wdb("exeucting function at", f.functionAddress, " args ", arg);
+          wdb("total args ", f.totalArguments, " applied ", f.appliedArguments);
+              Scope s;
+              s.closureScope = f.closureScope;
+              s.returnAddress = ms.pc;
+              ms.scopes ~= s;
+              push(ms,arg);                            
+              vm.CurrentMachine.pc = f.functionAddress;
+        }
+      else
+        {
+          
+          assert(false,format("%s not a function value", fh));
+        }
+      
+      break;
+
     case vm.opcode.ret:
       wdb("ret");
-      if(ms.callStack.length > 1)
+      if(ms.scopes.length > 1)
         {
-          ms.pc = ms.callStack[$-1].returnAddress;
-          wdb("pc now ", ms.pc, " call stack length ", ms.callStack.length);
-          ms.callStack = ms.callStack[0..$-1];
-          wdb("pc now ", ms.pc, " call stack length ", ms.callStack.length);
+          //walk backwards down the scopes until we find one
+          // with a return address
+          int index = 1;
+          foreach_reverse(ref cf; ms.scopes)
+            {
+              if(cf.IsFunction)
+                {
+                  break;
+                }
+              index++;
+            }
+          //writeln("returnig ..");
+          ms.pc = ms.scopes[$-index].returnAddress;
+          //          wdb("pc now ", ms.pc, " call stack length ", ms.callStack.length);
+          ms.scopes = ms.scopes[0..$-index];
+          //          wdb("pc now ", ms.pc, " call stack length ", ms.callStack.length);
         }
       else
         {
@@ -1937,7 +2042,7 @@ unittest  {
   wdb("entry point : ", entry);
   vm.machines[0].pc = entry;
   vm.program = outprog;
-  vm.machines[0].callStack ~= StackFrame();
+  vm.machines[0].scopes ~= Scope();
   vm.strings = s;
   
   vm.lastHeart = MonoTime.currTime;
@@ -1964,6 +2069,7 @@ unittest  {
 unittest {
   VM vm = new VM();
   setupTest(&vm);
+  writeln(vm.strings);
   while(vm.machines[0].pc < vm.program.length && !vm.finished )
     {
       if(step(&vm))
@@ -1991,12 +2097,12 @@ unittest {
 
 //  unittest {
 //   import std.traits;
-//   import std.algorithm;
+//   import stbd.algorithm;
 //   auto ops = EnumMembers!(VM.opcode);
 //   // [(list 'stvar x)    (flatten (list #x04 (get-int-bytes(check-string x))))]
 //   //  [(list 'sub)        #x08]
 
-//   auto special = ["stvar", "p_stvar",  "ldval", "ldvals", "ldvalb", "bne", "bgt", "blt", "beq", "branch", "ldvar", "call"];
+//   auto special = ["stvar", "p_stvar",  "ldval", "ldvals", "ldvalb", "bne", "bgt", "blt", "beq", "branch", "ldvar", "call"];  
 
 //   foreach(i,o;ops)
 //     {

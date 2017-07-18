@@ -21,7 +21,7 @@ void Server(Tid parentId)
 
   vm.machines ~= MachineStatus();
   writeln("program loaded: ", vm.program);
-  vm.machines[0].callStack ~= StackFrame();
+  vm.machines[0].scopes ~= Scope();
   vm.lastHeart = MonoTime.currTime;
   vm.zmqThread = parentId;
   vm.requiredPlayers = 1;
