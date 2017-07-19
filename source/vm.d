@@ -98,11 +98,6 @@ class Location
   }
 }
 
-class Card : GameObject
-{
-  GameObject front;
-  GameObject back;
-}
 
 class Stack : GameObject
 {
@@ -116,7 +111,7 @@ class Stack : GameObject
 
   void shuffle(StackLocation loc)
   {
-
+    
   }
   
   void deal(int num, StackLocation sourceLoc, Stack* dest)
@@ -131,7 +126,7 @@ class Stack : GameObject
 
   void split(int num, Stack* dest)
   {
-
+    
   }
 }
 
@@ -643,15 +638,24 @@ void ldprop(MachineStatus* ms, string name, HeapVariant obj)
   HeapVariant result;
   if(obj.peek!GameObject)
     {
-      auto prop = (obj.get!GameObject()).props[name];
-      if(prop.peek!HeapVariant)
+      GameObject go = obj.get!GameObject;
+      if(auto arr = go.props[name].peek!(HeapVariant[]))
         {
-          result = prop;
+          //pointer
+          result = new HeapVariant(arr);
         }
       else
         {
-          result = new HeapVariant(prop);
-        }              
+          auto prop = (obj.get!GameObject()).props[name];
+          if(prop.peek!HeapVariant)
+            {
+              result = prop;
+            }
+          else
+            {
+              result = new HeapVariant(prop);
+            }
+        }
     }
   else if(obj.peek!Location)
     {
@@ -831,8 +835,16 @@ void locateVar(MachineStatus* ms, string index, Scope* currentScope)
 {
   if(index in currentScope.locals)
     {
-      //wdb("ldvar local ", index, " : ", ms.currentFrame.locals[index].var);
-      push(ms,currentScope.locals[index]);
+      //    wdb("ldvar local ", index, " : ", ms.currentFrame.locals[index].var);
+      if(auto arr = currentScope.locals[index].peek!(HeapVariant[]))
+        {
+          push(ms, new HeapVariant(arr));
+        }
+      else
+        {
+          push(ms,currentScope.locals[index]);
+        }
+
     }
   else if(currentScope.closureScope !is null)
    {
@@ -869,7 +881,7 @@ bool step(VM* vm)
       auto s = getString(ms,vm);
       wdb("ldvals ", s);
       push(ms,new HeapVariant(s));
-      //wdb("stack  ", ms.evalStack);
+       wdb("stack  ", ms.evalStack);
       break;
 
     case vm.opcode.ldvalb:
@@ -1529,15 +1541,24 @@ bool step(VM* vm)
       auto item = pop(ms);
       //wdb("item is = ", item);
       auto list = pop(ms);
-      assert(list.peek!(HeapVariant[]));
+      
       //wdb("appendlist ", item, " :: ", list);          
       // we must peek here to get a pointer otherwise
       // it will get copied
-      if( auto l = list.peek!(HeapVariant[]))
+      if( auto l = list.peek!(HeapVariant[]*))
         {
+          **l ~= item;
+        }
+      else if(auto l = list.peek!(HeapVariant[]))
+        {
+          // this case happens with a new list
           *l ~= item;
         }
-      wdb("list now : ", (list.get!(HeapVariant[])));
+      else
+        {
+          assert(false, "invalid array");
+        }
+      //wdb("list now : ", (list.get!(HeapVariant[]*)));
       break;
 
     case vm.opcode.p_appendlist: // appends top of stack to next stack (a list )
@@ -1546,13 +1567,21 @@ bool step(VM* vm)
       auto item = pop(ms);
       //wdb("item is = ", item);
       auto list = peek(ms);
-      assert(list.peek!(HeapVariant[]));
       //wdb("appendlist ", item, " :: ", list);          
       // we must peek here to get a pointer otherwise
       // it will get copied
-      if( auto l = list.peek!(HeapVariant[]))
+      if( auto l = list.peek!(HeapVariant[]*))
         {
+          **l ~= item;
+        }
+      else if(auto l = list.peek!(HeapVariant[]))
+        {
+          // this case happens with a new list
           *l ~= item;
+        }
+      else
+        {
+          assert(false, "invalid array");
         }
       //wdb("list now : ", (list.get!(HeapVariant[])));
       break;
@@ -1562,32 +1591,35 @@ bool step(VM* vm)
       // val :: list
       //wdb("removelist");
       //wdb("stack : ", ms.evalStack);
-      auto key = pop(ms);
-      //wdb("item is = ", key.var);
-      auto list = pop(ms);
-      assert(list.peek!(HeapVariant[]));
+      // auto key = pop(ms);
+      // //wdb("item is = ", key.var);
+      // auto list = pop(ms);
+      // assert(list.peek!(HeapVariant[]*));
 
-      HeapVariant[] newList;
-      if( auto l = list.peek!(HeapVariant[]))
-        {
-          foreach(i; *l)
-            {
-              wdb("testing if ", i, "!= ", key.var);
-              if(i.var != key.var)
-                {
-                  newList ~= i;
-                }
-            }
-        }
+      // HeapVariant[] newList;
+      // if( auto l = list.peek!(HeapVariant[]*))
+      //   {
+      //     foreach(i; **l)
+      //       {
+      //         wdb("testing if ", i, "!= ", key.var);
+      //         if(i.var != key.var)
+      //           {
+      //             newList ~= i;
+      //           }
+      //       }
+      //   }
 
-      //wdb("list on stack now : ");
-      foreach(l;newList)
-        {
-          wdb(l.var);
-        }
+      // //wdb("list on stack now : ");
+      // foreach(l;newList)
+      //   {
+      //     wdb(l.var);
+      //   }
 
-      push(ms, new HeapVariant(newList));
+      // push(ms, new HeapVariant(newList));
       break;
+
+
+
 
     case vm.opcode.p_removelist: //  creates a new list removing keys
       // val :: list
@@ -1625,13 +1657,19 @@ bool step(VM* vm)
       auto index = pop(ms);
       auto list = pop(ms);
       //wdb(list.var);
-      assert(list.peek!(HeapVariant[]));
       auto i = index.get!int;
       if(auto listt = list.peek!(HeapVariant[]))
         {
-          //wdb("listindex ", (*listt), " ", index.var); 
-         push(ms,(*listt)[i]);
-
+          //wdb("listindex ", (*listt), " ", index.var);
+          push(ms,(*listt)[i]);
+        }
+      else if(auto listt = list.peek!(HeapVariant[]*))
+        {
+          push(ms,(**listt)[i]);
+        }
+      else
+        {
+          assert(false, "ivalid array");
         }
 
       break;
@@ -1640,15 +1678,21 @@ bool step(VM* vm)
       //wdb("listindex ",ms.evalStack);
       auto index = pop(ms);
       auto list = peek(ms);
-      //wdb(list.var);
-      assert(list.peek!(HeapVariant[]));
+      //wdb(list.var);      
       auto i = index.get!int;
       if(auto listt = list.peek!(HeapVariant[]))
         {
           //wdb("listindex ", (*listt), " ", index.var);
           push(ms,(*listt)[i]);
         }
-
+      else if(auto listt = list.peek!(HeapVariant[]*))
+        {
+          push(ms,(**listt)[i]);
+        }
+      else
+        {
+          assert(false, "ivalid array");
+        }
       break;
 
     case vm.opcode.keys:
@@ -1715,9 +1759,19 @@ bool step(VM* vm)
 
     case vm.opcode.p_len:
       auto list = peek(ms);
-      assert(list.peek!(HeapVariant[]));
-      auto l = list.peek!(HeapVariant[]);
-      auto len =(*l).length;
+      int len = 0;
+      if(auto l = list.peek!(HeapVariant[]))
+        {
+          len =(*l).length;
+        }
+      else if(auto l = list.peek!(HeapVariant[]*))
+        {
+          len = (**l).length;
+        }
+      else
+        {
+          assert(false, "invalid array");
+        }
       push(ms,new HeapVariant(cast(int)len));
       //wdb("listlen ", list, " ", cast(int)len);
       break;
@@ -1898,11 +1952,26 @@ bool step(VM* vm)
             
       break;
     case vm.opcode.dbg:
-      write(pop(ms).var);
+      auto hv = pop(ms);
+      if(auto arr = hv.peek!(HeapVariant[]*))
+        {
+          write(**arr);
+        }
+      else
+        {
+          write(hv.var);
+        }
       break;
     case vm.opcode.dbgl:
-      //write(MonoTime.currTime);
-      writeln(pop(ms).var);                  
+      auto hv = pop(ms);
+      if(auto arr = hv.peek!(HeapVariant[]*))
+        {
+          writeln(**arr);
+        }
+      else
+        {
+          writeln(hv.var);
+        }
       break;
 
     default:
