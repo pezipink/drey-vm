@@ -29,6 +29,22 @@ class HeapVariant
   {
     return var.toString;
   }
+
+  int opCmp(ref const HeapVariant b)
+  {
+    if(var.peek!int)
+      {
+        return var.get!int > b.get!int ? 1 : -1;
+      }
+    else if(var.peek!string)
+      {
+        return var.get!string > b.get!string ? 1 : -1;
+      }
+    else
+      {
+        assert(false, "can only sort ints");
+      }
+  }
 }
 enum MessageType
   {
@@ -170,6 +186,7 @@ class VM
 {
   enum opcode
     {
+      brk,   // breakpoint (future use)
       pop,   // throw away top item 
       ldval,
       ldvals,
@@ -182,6 +199,8 @@ class VM
       p_ldprop,
       stprop,
       p_stprop,
+      inc,
+      dec,
       add,
       sub,
       mul,
@@ -255,13 +274,11 @@ class VM
       adduni,
       deluni,
                        
-      roll,
-      
-      deal,
+      splitat,
       shuffle,
-      merge,
-      sort, // prop name
-
+      sort, // number / string lists
+      sortby, // prop name
+      
       // flowroutine / messaging
       genreq,
       addaction,
@@ -275,7 +292,6 @@ class VM
       popscope,
       lambda,
       apply,
-      p_apply,
       ret,
 
       dbg,  // prints to the console
@@ -594,19 +610,23 @@ void moveObjectRec(VM* vm, Location targetLoc, GameObject obj)
       vm.universe.objects[obj.id] = obj;      
       AnnounceDelta(vm,"aui",[tuple("o",Variant(obj))],"");
     }
-          
-  //remove from current location
-  if(obj.locationKey != null && obj.locationKey != "")
+
+  if(obj.locationKey !is null && obj.locationKey != targetLoc.key)
     {
+      //remove from current location  
       auto currentLocation = vm.universe.locations[obj.locationKey];
-      currentLocation.objects.remove(obj.id);              
+      currentLocation.objects.remove(obj.id);                
     }
 
-  obj.locationKey = targetLoc.key;
-  targetLoc.objects[obj.id] = obj;
+  if(obj.locationKey is null || obj.locationKey != targetLoc.key)
+    {
+      // move and announce
+      obj.locationKey = targetLoc.key;
+      targetLoc.objects[obj.id] = obj;
 
-  AnnounceDelta(vm,"mo",[tuple("o",Variant(obj.id)),
-                         tuple("l",Variant(targetLoc.key))],"");
+      AnnounceDelta(vm,"mo",[tuple("o",Variant(obj.id)),
+                             tuple("l",Variant(targetLoc.key))],"");
+    }
 
   // we must move all objects contained within this as well
   auto toProcess = getGameObjects(obj.props);
@@ -620,16 +640,19 @@ void moveObjectRec(VM* vm, Location targetLoc, GameObject obj)
           AnnounceDelta(vm,"aui",[tuple("o",Variant(go))],"");       
         }
 
-      if(go.locationKey != null && go.locationKey != "")
+      if(go.locationKey !is null && go.locationKey != "")
         {
           auto currentLocation = vm.universe.locations[obj.locationKey];
           currentLocation.objects.remove(obj.id);              
         }
-      
-      go.locationKey = targetLoc.key;
-      targetLoc.objects[go.id] = obj;
-      AnnounceDelta(vm,"mo",[tuple("o",Variant(go.id)),
-                             tuple("l",Variant(targetLoc.key))],"");
+
+      if(go.locationKey is null || go.locationKey != targetLoc.key)
+        {
+          go.locationKey = targetLoc.key;
+          targetLoc.objects[go.id] = obj;
+          AnnounceDelta(vm,"mo",[tuple("o",Variant(go.id)),
+                                 tuple("l",Variant(targetLoc.key))],"");
+        }
     }
 }
 
@@ -660,6 +683,10 @@ void ldprop(MachineStatus* ms, string name, HeapVariant obj)
   else if(obj.peek!Location)
     {
       auto loc = obj.peek!Location;
+      if(name !in loc.props)
+        {
+          assert(false, format("%s not found in %s", name, loc.key));          
+        }
       auto prop = loc.props[name];
               
       if(is(prop == prop.peek!HeapVariant))
@@ -944,7 +971,34 @@ bool step(VM* vm)
       auto obj = peek(ms);
       stprop(vm, name.get!string,obj,val);
       break;
-           
+
+    case vm.opcode.inc:
+      {
+        auto num = peek(ms);
+        if(auto n = num.peek!int)
+          {
+            (*n)++;
+          }
+        else
+          {
+            assert(false, "expected number");
+          }
+        break;
+      }
+    case vm.opcode.dec:
+      {
+        auto num = peek(ms);
+        if(auto n = num.peek!int)
+          {
+            (*n)--;
+          }
+        else
+          {
+            assert(false, "expected number");
+          }
+        break;
+      }
+
     case vm.opcode.add: 
       auto res = pop2(ms);
       //writeln("add ", res);
@@ -1084,7 +1138,7 @@ bool step(VM* vm)
       contains(ms, v, obj);
       break;
           
-    case vm.opcode.p_contains:
+    case vm.opcode.p_contains:      
       auto val = pop(ms);
       auto obj = peek(ms);
       assert(val.peek!string);
@@ -1572,11 +1626,12 @@ bool step(VM* vm)
       // it will get copied
       if( auto l = list.peek!(HeapVariant[]*))
         {
+          
           **l ~= item;
         }
       else if(auto l = list.peek!(HeapVariant[]))
         {
-          // this case happens with a new list
+          // this case happens with a new list not bound ...
           *l ~= item;
         }
       else
@@ -1749,11 +1804,21 @@ bool step(VM* vm)
           
     case vm.opcode.len:
       auto list = pop(ms);          
-      wdb("!! ", list.var);
-      assert(list.peek!(HeapVariant[]));
-      auto l = list.peek!(HeapVariant[]);
-      auto len =(*l).length;
-      push(ms,new HeapVariant(cast(int)len));
+      if(auto l = list.peek!(HeapVariant[]))
+        {
+          auto len =(*l).length;
+          push(ms,new HeapVariant(cast(int)len));
+        }
+      else if(auto l = list.peek!(HeapVariant[]*))
+        {
+          auto len =(**l).length;
+          push(ms,new HeapVariant(cast(int)len));
+
+        }
+      else
+        {
+          assert(false, "expected an array");
+        }
       //wdb("listlen ", list, " ", len);
       break;
 
@@ -1899,28 +1964,6 @@ bool step(VM* vm)
         }
       
       break;
-    case vm.opcode.p_apply:
-
-      auto arg = pop(ms);
-      auto fh = peek(ms);
-      if(auto f = fh.peek!Function)
-        {
-          wdb("exeucting function at", f.functionAddress, " args ", arg);
-          wdb("total args ", f.totalArguments, " applied ", f.appliedArguments);
-              Scope s;
-              s.closureScope = f.closureScope;
-              s.returnAddress = ms.pc;
-              ms.scopes ~= s;
-              push(ms,arg);                            
-              vm.CurrentMachine.pc = f.functionAddress;
-        }
-      else
-        {
-          
-          assert(false,format("%s not a function value", fh));
-        }
-      
-      break;
 
     case vm.opcode.ret:
       wdb("ret");
@@ -1951,6 +1994,126 @@ bool step(VM* vm)
         }
             
       break;
+    case vm.opcode.shuffle:
+      {
+        auto list = pop(ms);
+        if(auto arr = list.peek!(HeapVariant[]*))
+          {
+            import std.random : randomShuffle;
+            randomShuffle(**arr);
+          }
+        else
+          {
+            assert(false, "exepcted an array to shuffle");
+          }
+        
+        break;
+        
+            
+      }
+    case vm.opcode.splitat:
+      {
+        //modifies the list in place, leaving the new
+        //list on the heap
+        auto bottom = pop(ms).get!bool;
+        auto n = pop(ms).get!int;
+        auto list = pop(ms);
+        if(auto arr = list.peek!(HeapVariant[]*))
+          {
+            if(bottom)
+              {
+                //remove from start of list]
+                HeapVariant[] newArr;
+                newArr = (**arr)[0..n];
+                (**arr) = (**arr)[n..$];
+                push(ms, new HeapVariant(newArr));
+              }
+            else
+              {
+                // remove from top of list
+                HeapVariant[] newArr;
+                newArr = (**arr)[n..$];
+                (**arr) = (**arr)[0..n];
+                push(ms, new HeapVariant(newArr));
+              }
+          }
+        else
+          {
+            assert(false, "expected array");
+          }
+        break;
+      }
+    case vm.opcode.sort:
+      {
+        import std.algorithm : sort;
+        bool desc = pop(ms).get!bool;
+        auto list = pop(ms);
+        if(auto arr = list.peek!(HeapVariant[]*))
+          {
+            if(desc)
+              {
+                sort!("a > b")(**arr);
+              }
+            else
+              {
+                sort(**arr);
+              }
+          }
+        else
+          {
+            assert(false, "exepcted an array to sort");
+          }
+        break;
+      }
+
+    case vm.opcode.sortby:
+      {
+        
+        auto key = pop(ms).get!string;
+        auto desc = pop(ms).get!bool;
+        import std.algorithm : sort;
+        auto list = pop(ms);
+        
+        if(auto arr = list.peek!(HeapVariant[]*))
+          {
+            bool myComp(HeapVariant x, HeapVariant y) 
+            {
+              writeln("!!!");
+              if( auto xi = x.peek!GameObject)
+                {
+                  if( auto yi = y.peek!GameObject)
+                    {
+                      if(key in xi.props && key in yi.props)
+                        {
+                          if(desc)
+                            {
+                              return xi.props[key] > yi.props[key];                                  }
+                          else
+                            {
+                              return xi.props[key] < yi.props[key];                                  }
+                        }                      
+                      else
+                        {
+                          assert(false, "sorting key not present in both objects");
+                        }
+                    }
+                }
+              assert(0, "can only sort game objects");            
+            }
+
+            sort!(myComp)(**arr);
+
+          }
+
+
+        else
+          {
+            assert(false, "exepcted an array to sort");
+          }
+
+        break;
+      }
+      
     case vm.opcode.dbg:
       auto hv = pop(ms);
       if(auto arr = hv.peek!(HeapVariant[]*))
@@ -2129,57 +2292,57 @@ unittest  {
   }
 }
 
-unittest {
-  VM vm = new VM();
-  setupTest(&vm);
-  writeln(vm.strings);
-  while(vm.machines[0].pc < vm.program.length && !vm.finished )
-    {
-      if(step(&vm))
-        {
-          if(!vm.finished)
-            {
-              auto msg = vm.CurrentMachine.waitingMessage.get!ClientMessage;
-              JSONValue j;
-              j["id"]="pyramid-card";
-              //j["id"]="green-leg";
-              handleResponse(&vm, msg.client, j);
-            }
-        }
-    }
-  writeln("suspended or finished");
-  writeln("Locations count ", vm.universe.locations.length);
-  // foreach(l;vm.universe.locations)
-  //   {
-  //     writeln(l.key);
-  //   }
+// unittest {
+//   VM vm = new VM();
+//   setupTest(&vm);
+//   writeln(vm.strings);
+//   while(vm.machines[0].pc < vm.program.length && !vm.finished )
+//     {
+//       if(step(&vm))
+//         {
+//           if(!vm.finished)
+//             {
+//               auto msg = vm.CurrentMachine.waitingMessage.get!ClientMessage;
+//               JSONValue j;
+//               j["id"]="1";
+//               //j["id"]="green-leg";
+//               handleResponse(&vm, msg.client, j);
+//             }
+//         }
+//     }
+//   writeln("suspended or finished");
+//   writeln("Locations count ", vm.universe.locations.length);
+//   // foreach(l;vm.universe.locations)
+//   //   {
+//   //     writeln(l.key);
+//   //   }
     
   
- }
+//  }
 
 
-//  unittest {
-//   import std.traits;
-//   import stbd.algorithm;
-//   auto ops = EnumMembers!(VM.opcode);
-//   // [(list 'stvar x)    (flatten (list #x04 (get-int-bytes(check-string x))))]
-//   //  [(list 'sub)        #x08]
+ unittest {
+  import std.traits;
+  import std.algorithm;
+  auto ops = EnumMembers!(VM.opcode);
+  // [(list 'stvar x)    (flatten (list #x04 (get-int-bytes(check-string x))))]
+  //  [(list 'sub)        #x08]
 
-//   auto special = ["stvar", "p_stvar",  "ldval", "ldvals", "ldvalb", "bne", "bgt", "blt", "beq", "branch", "ldvar", "call"];  
+  auto special = ["stvar", "p_stvar",  "ldval", "ldvals", "ldvalb", "bne", "bgt", "blt", "beq", "branch", "ldvar", "lambda"];  
 
-//   foreach(i,o;ops)
-//     {
-//       string op = o.to!string;
-//       if( special.any!(x=>x==op))
-//         {
-//           writeln("[(list '",op," x)    (flatten (list ",i," (get-int-bytes(check-string x))))]");
-//         }
-//       else
-//         {
-//           writeln("[(list '",op,") ",i,"]"); 
-//         }
+  foreach(i,o;ops)
+    {
+      string op = o.to!string;
+      if( special.any!(x=>x==op))
+        {
+          writeln("[(list '",op," x)    (flatten (list ",i," (get-int-bytes(check-string x))))]");
+        }
+      else
+        {
+          writeln("[(list '",op,") ",i,"]"); 
+        }
       
       
-//     }
-// }
+    }
+}
 
