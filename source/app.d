@@ -1,8 +1,12 @@
 
+import std.file;
 import std.stdio;
 import std.conv;
+import std.range;
+import std.algorithm;
 import std.json;
 import std.format;
+import std.string;
 import zmqd;
 import vm;
 //import zhelpers;
@@ -213,94 +217,730 @@ void Server(Tid parentId)
 
 
 
-void main()
-{
-  // Prepare our context and sockets
-  writeln( "start");
-  auto server = Socket(SocketType.router);
-  writeln("bdining socket");
-  server.bind("tcp://*:5560");
 
-  // Initialize poll set
-  auto items = [
-                PollItem(server, PollFlags.pollIn),
-                ];
-  writeln("spawning server...");
-  auto worker = spawn(&Server, thisTid);
+
+import dlangui;
+import dlangui.widgets.tree;
+
+
+
+enum IDEActions : int {
+  FileOpen = 1,
+    DebuggerStep,
+    SetBreakpoint,
+    DebuggerRun
+}
+
+// actions
+const Action ACTION_FILE_OPEN = new Action(IDEActions.FileOpen, "MENU_FILE_OPEN"c, "document-open", KeyCode.KEY_O, KeyFlag.Control);
+
+const Action ACTION_STEP = new Action(IDEActions.DebuggerStep, "DEBUGGER_STEP"c, "debugger-step", KeyCode.F10, 0);
+
+const Action ACTION_RUN = new Action(IDEActions.DebuggerRun, "DEBUGGER_RUN"c, "debugger-run", KeyCode.F5, 0);
+
+const Action ACTION_SET_BREAKPOINT = new Action(IDEActions.SetBreakpoint, "SET_BREAKPOINT"c, "set-breakpoint", KeyCode.F9, 0);
+
+import dlangui.dialogs.filedlg;
+import dlangui.dialogs.dialog;
+
+
+class DreyFrame : AppFrame {
+
+    MenuItem mainMenuItems;
+
+    override protected void initialize() {
+        _appName = "Drey VM";
+        super.initialize();
+        if(statusLine)
+          {
+            statusLine.setStatusText("Drey VM");
+          }
+        loadScurry("c:\\temp\\test.scur");
+        //        updatePreview();
+        postExecution();
+    }
+
+    /// create main menu
+    override protected MainMenu createMainMenu() {
+        mainMenuItems = new MenuItem();
+        MenuItem fileItem = new MenuItem(new Action(1, "MENU_FILE"));
+        fileItem.add( ACTION_FILE_OPEN);
+        fileItem.add( ACTION_STEP);
+        fileItem.add( ACTION_SET_BREAKPOINT);
+        fileItem.add( ACTION_RUN);
+        mainMenuItems.add(fileItem);
+        MainMenu mainMenu = new MainMenu(mainMenuItems);
+        return mainMenu;
+    }
+
+
+    /// create app toolbars
+    override protected ToolBarHost createToolbars() {
+        ToolBarHost res = new ToolBarHost();
+        ToolBar tb;
+        tb = res.getOrAddToolbar("Standard");
+        tb.addButtons( ACTION_FILE_OPEN);
+        return res;
+    }
+
+    string _filename;
+    void openSourceFile(string filename) {
+        import std.file;
+        if (exists(filename)) {
+            // _filename = filename;
+            // window.windowCaption = toUTF32(filename);
+            // _editor.load(filename);
+            // updatePreview();
+        }
+    }
+
+    bool onCanClose() {
+        // todo
+        return true;
+    }
+
+    FileDialog createFileDialog(UIString caption, bool fileMustExist = true) {
+        uint flags = DialogFlag.Modal | DialogFlag.Resizable;
+        if (fileMustExist)
+            flags |= FileDialogFlag.FileMustExist;
+        FileDialog dlg = new FileDialog(caption, window, null, flags);
+        //        dlg.filetypeIcons[".scr"] = "text-dml";
+        return dlg;
+    }
+
+  protected VM _vm = new VM();
+
+  void refreshTree()
+  {
+    TreeWidget root = cast(TreeWidget)childById("DreyRoot");
     
-  // Switch messages between sockets
-  while (true) {
-    Frame frame;
-    ClientMessage message;
+    //TreeItem tree1 = tree.items.newChild("group1", "Group 1"d, "document-open");
+    //    tree1.newChild("g1_1", "Group 1 item 1"d);
 
-    if(!receiveTimeout
-       (dur!"msecs"(1),
-        (ClientMessage msg)
-        {
-          server.send(msg.client,true);
-          ubyte[] data = [cast(ubyte)msg.type];
-
-          if(msg.type == MessageType.Data)
-            {
-              server.send(data,true);
-              //writeln("sending json ", msg.json);
-              server.send(msg.json);
-            }
-          else
-            {
-              server.send(data);
-            }
-
-        },
-          
-        (Variant  any) { writeln("unexpected msg ", any);}
-        ))
+  }
+  void showInstruction(int number)
+  {
+    auto text = (number+1).to!dstring;
+    if(text in _rowLookup)
       {
-        poll(items, dur!"msecs"(1));
-        if (items[0].returnedEvents & PollFlags.pollIn) {            
-          bool invalidMessage = false;
-          /// first frame will be the id
-          frame.rebuild();
-          server.receive(frame);
-          string client = frame.data.asString;
-          //            writeln("identifier ", client);
-          message.client = client.dup;
-          if(frame.more)
-            {
-              frame.rebuild();
-              server.receive(frame);
-              // see what sort of message this is
-              message.type = cast(MessageType)frame.data[0];
-            }
-          //            writeln("message type ", message.type);
-          if(frame.more)
-            {
-              if(message.type == MessageType.Data)
-                {
-                  frame.rebuild();
-                  server.receive(frame);
-                  message.json = frame.data.asString.dup;
-                  send(worker, message);
-                  //                    writeln("sent message to worker ", message);
-                }
-              else
-                {                
-                  //bad message, swallow it up
-                  invalidMessage = true;
-                  do {
-                    frame.rebuild();
-                    server.receive(frame);
-                  } while (frame.more);
-                  writeln("invalid message received");
-                }
+        _grid.makeCellVisible(3, _rowLookup[text]+1);
+        _grid.selectCell(3, _rowLookup[text]+1, true);
+      }
+  }
 
+  void ss(string s)
+  {
+    statusLine.setStatusText(s.to!dstring);
+  }
+  void ss(dstring s)
+  {
+    statusLine.setStatusText(s);
+  }
+
+
+  
+  TreeItem _selectedTree = null;
+
+  void PushScope()
+  {
+    int max = _vm.CurrentMachine.scopes.length;
+    TreeWidget root = childById!TreeWidget("DreyRoot");
+    assert(root, "root not found");
+    // root.items.newChild("dskd","WTF"d);
+    // _selectedTree.newChild("dskjdkfjkdd","WTF"d);
+    auto parent = root.items.findItemById("machine0scopes");
+    assert(parent, "could not find scopes parent");
+
+    ss(format("found parent, max is %s", max));
+    string s1 = format("machine0scope%s",max-1);
+    auto s2 = format("Scope %s",max-1).to!dstring;
+
+   
+    TreeItem newNode = _scopes.newChild(s1, "B", null);
+    invalidate();
+    // root.requestLayout();
+    // root.invalidate();
+    
+    //    parent.invalidate();
+
+  }
+
+  void PopScope()
+  {
+    int max = _vm.CurrentMachine.scopes.length;
+    TreeWidget root = childById!TreeWidget("DreyRoot");
+
+    string id = format("machine0scope%s",max);
+    auto tr = root.items.findItemById(id);
+    auto parent = cast(TreeItem)tr.parent;
+    parent.removeChild(id);    
+  }
+  
+  void updateViewer()
+  {
+    if(_selectedTree)
+      {
+        auto sthing = cast(StringListWidget)childById("stringthing");
+    
+        if(_selectedTree.id.startsWith("machine0stack"))
+          {
+            auto items = _vm.CurrentMachine.evalStack.map!(x=>format("%s",x)).array;
+            sthing.items = items;
+          }
+        else if(_selectedTree.id.startsWith("machine0scope"))
+          {
+            if(_selectedTree.id != "machine0scopes")
+              {
+                try
+                  {
+                    string s = _selectedTree.id[$-1..$];
+                    int id = parse!int(s);
+                    if(_vm.CurrentMachine.scopes.length > id)
+                      {
+                        auto items =
+                          _vm.CurrentMachine.scopes[id].locals
+                          .byKeyValue                          
+                          .map!(x=>format("%s => %s",x.key, x.value))
+                          .array;
+                        sthing.items = sort(items).array;
+                      }
+                  }
+                catch(Exception ex)
+                  {
+                    ss(ex.msg);
+                  }
+              }
+          }
+
+      }
+  }
+  void postExecution()
+  {
+    // update all the things here
+    //   ss(format("vm now at instruction %s count %s", _vm.CurrentMachine.pc, stepCount));
+    showInstruction(_vm.CurrentMachine.pc);
+    _grid.updateExec(_vm.CurrentMachine.pc);
+    // 1.  show the currently executing instruction
+    // 2.  update the tree views??
+    // 3.  update whatever has context based on tree selection
+    updateViewer();
+    invalidate();
+  }
+  
+  void loadScurry(string fileName)
+  {
+    _vm.Initialize(fileName);
+    _vm.isDebug = true;
+    _vm.AddPlayer("A");
+
+    int row = 0;
+    int index = 0;
+    ubyte readByte()
+    {
+      auto res = _vm.program[index];
+      index++;
+      return res;
+    }
+
+    short readWord()
+    {
+      ushort res = readByte() << 8;
+      res |= readByte();
+      return res;
+    }
+
+    int readInt()
+    {
+      int res = readWord() << 16;
+      res |= readWord();
+      return res;
+    }
+
+    dstring getString()
+    {
+      auto lookup = readInt();
+      return _vm.strings[lookup].to!dstring;
+    }
+
+    //iterating the program twice just to size and populate
+    //the grid isnt very nice but whatevs, itll do for now
+    while(index < _vm.program.length)
+      {
+        VM.opcode op = cast(VM.opcode)readByte();
+        switch(op)
+          {
+          case VM.opcode.stvar:
+          case VM.opcode.p_stvar:
+          case VM.opcode.ldvals:
+          case VM.opcode.ldvar:
+            getString();
+            break;
+          case VM.opcode.ldval:
+          case VM.opcode.bne:
+          case VM.opcode.bgt:
+          case VM.opcode.blt:
+          case VM.opcode.beq:
+          case VM.opcode.branch:
+          case VM.opcode.lambda:
+            readInt();
+            break;
+          case VM.opcode.ldvalb:
+            readInt();
+            break;
+          default:
+            break;
+          
+          }
+        row++;
+      }
+    _grid.resize(5,row);
+    index = 0;
+    row=0;
+
+    while(index < _vm.program.length)
+      {
+        VM.opcode op = cast(VM.opcode)readByte();
+        _grid.setCellText(0,row, index.to!dstring);
+        _rowLookup[index.to!dstring] = row;
+        _grid.setCellText(2,row, format("%s", op).to!dstring);
+        switch(op)
+          {
+          case VM.opcode.stvar:
+          case VM.opcode.p_stvar:
+          case VM.opcode.ldvals:
+          case VM.opcode.ldvar:
+            _grid.setCellText(3,row, getString());
+            break;
+          case VM.opcode.ldval:
+            _grid.setCellText(3,row, readInt().to!dstring);
+            break;
+          case VM.opcode.bne:
+          case VM.opcode.bgt:
+          case VM.opcode.blt:
+          case VM.opcode.beq:
+          case VM.opcode.branch:
+          case VM.opcode.lambda:
+            int address = readInt();
+            int actualAddress = index + address - 4;
+            _grid.setCellText(3,row, actualAddress.to!dstring);
+            break;
+          case VM.opcode.ldvalb:
+            bool b = readInt() != 0;
+            _grid.setCellText(3,row, b.to!dstring);
+            break;
+          default:
+            break;
+          
+          }
+
+        row++;
+      }
+
+    _grid.autoFit();
+
+
+  }
+  
+    void saveAs() {
+    }
+  int stepCount = 0;
+    /// override to handle specific actions
+    override bool handleAction(const Action a) {
+      if (a) {
+        switch (a.id) {
+        case IDEActions.FileOpen:
+          UIString caption;
+          caption = "Open DML File"d;
+          FileDialog dlg = createFileDialog(caption);
+          dlg.addFilter(FileFilterEntry(UIString("Scurry files"d), "*.scur"));
+          dlg.addFilter(FileFilterEntry(UIString("All files"d), "*.*"));
+          dlg.dialogResult = delegate(Dialog dlg, const Action result) {
+            if (result.id == ACTION_OPEN.id) {
+              string filename = result.stringParam;
+              loadScurry(filename);
+              statusLine.setStatusText("Program loaded."d);
             }
-          else
+          };
+          dlg.show();
+          return true;
+        case IDEActions.SetBreakpoint:
+          auto text =_grid.cellText(0,_grid.row);
+          ss(text);
+          int index = text.parse!int;
+          _breakpoints[index] = 0;
+          _grid.setBreakpoint(index);
+          return true;
+        case IDEActions.DebuggerRun:
+          auto oc = peekOpcode(&_vm);
+          try
             {
-              send(worker, message);
+              while(_vm.CurrentMachine.pc+1 !in _breakpoints)
+                {
+                  oc = peekOpcode(&_vm);
+                  step(&_vm);
+                  stepCount++;
+                }
             }
+          catch(Throwable e)
+            {
+              ss("Exception occured");
+              //              ss(e.msg);
+            }
+          postExecution();
+          return true;
+        case IDEActions.DebuggerStep:
+          auto oc = peekOpcode(&_vm);
+          step(&_vm);
+          stepCount++;
+          switch(oc)
+            {
+            case VM.opcode.apply:
+              PushScope();
+              break;
+            case VM.opcode.ret:
+              PopScope();
+              break;
+            default:
+              break;
+            }
+          postExecution();
+          return true;
+        default:
+          return super.handleAction(a);
         }
       }
+      return false;
+    }
+
+ /// override to handle specific actions state (e.g. change enabled state for supported actions)
+    override bool handleActionStateRequest(const Action a) {
+        switch (a.id) {
+            case IDEActions.FileOpen:
+                a.state = ACTION_STATE_ENABLED;
+                return true;
+            case IDEActions.DebuggerStep:
+                a.state = ACTION_STATE_ENABLED;
+                return true;
+        default:
+                return super.handleActionStateRequest(a);
+        }
+    }
+
+    void updatePreview() {
+        // dstring dsource = _editor.text;
+        // string source = toUTF8(dsource);
+        // try {
+        //     Widget w = parseML(source);
+        //     if (statusLine)
+        //         statusLine.setStatusText("No errors"d);
+        //     if (_fillHorizontal)
+        //         w.layoutWidth = FILL_PARENT;
+        //     if (_fillVertical)
+        //         w.layoutHeight = FILL_PARENT;
+        //     if (_highlightBackground)
+        //         w.backgroundColor = 0xC0C0C0C0;
+        //     _preview.contentWidget = w;
+        // } catch (ParserException e) {
+        //     if (statusLine)
+        //         statusLine.setStatusText(toUTF32("ERROR: " ~ e.msg));
+        //     _editor.setCaretPos(e.line, e.pos);
+        //     string msg = "\n" ~ e.msg ~ "\n";
+        //     msg = replaceFirst(msg, " near `", "\nnear `");
+        //     TextWidget w = new MultilineTextWidget(null, toUTF32(msg));
+        //     w.padding = 10;
+        //     w.margins = 10;
+        //     w.maxLines = 10;
+        //     w.backgroundColor = 0xC0FF8080;
+        //     _preview.contentWidget = w;
+        // }
+    }
+
+  protected bool _fillHorizontal;
+  protected bool _fillVertical;
+  protected bool _highlightBackground;
+  protected ScrollWidget _preview;
+  protected int[dstring] _rowLookup;
+  protected int[int] _breakpoints;
+  private TreeItem _scopes;
+  protected DisassemblyGrid _grid;
+    /// create app body widget
+    override protected Widget createBody() {
+        VerticalLayout bodyWidget = new VerticalLayout();
+        bodyWidget.layoutWidth = FILL_PARENT;
+        bodyWidget.layoutHeight = FILL_PARENT;
+        HorizontalLayout hlayout = new HorizontalLayout();
+        hlayout.layoutWidth = FILL_PARENT;
+        hlayout.layoutHeight = FILL_PARENT;
+        _grid = new DisassemblyGrid();
+        _grid.layoutHeight(FILL_PARENT);
+        //_grid.layoutWidth(FILL_PARENT);
+        _grid.layoutWidth = 1200;
         
+        //        _grid.layoutWidth = makePercentSize(50);
+        _grid.showColHeaders = true;
+        _grid.showRowHeaders = true;
+        _grid.resize(5, 50);
+        _grid.fixedCols = 3;
+        _grid.fixedRows = 0;
+        _grid.rowSelect = true; // testing full row selection
+        _grid.selectCell(4, 6, false);
+
+        class Handler : CellActivatedHandler, OnKeyHandler, OnTreeSelectionChangeListener
+        {
+          void onTreeItemSelected(TreeItems source, TreeItem selectedItem, bool activated)
+          {
+
+            _selectedTree = selectedItem;
+            updateViewer();
+          }
+
+          void onCellActivated(GridWidgetBase source, int col, int row)
+          {
+            auto text = _grid.cellText(col,row);
+            if(text in _rowLookup)
+              {
+                _grid.makeCellVisible(3, _rowLookup[text]+1);
+                _grid.selectCell(3, _rowLookup[text]+1, true);
+              }
+          }
+          bool onKey(Widget source, KeyEvent event)
+          {
+            //            statusLine.setStatusText("in onKey");
+            return false;
+          }
+        }
+
+        Handler h = new Handler();
+        _grid.cellActivated = h;
+        _grid.keyEvent = h;
+
+        VerticalLayout vlayout = new VerticalLayout();
+        vlayout.layoutWidth = FILL_PARENT;
+        vlayout.layoutHeight = FILL_PARENT;
+        
+       
+        TreeWidget tree = new TreeWidget("DreyRoot");
+            
+        TreeItem tree2 = tree.items.newChild("machinesroot", "Machines"d, "document-open");
+        auto machine0 = tree2.newChild("machine0", "Machine 0"d, null);
+        machine0.newChild("machine0stack", "Stack", null);
+        TreeItem scopes = machine0.newChild("machine0scopes", "Scopes", null);
+        _scopes = scopes;
+        scopes.newChild("machine0scope0","Scope 0", null);
+        
+        TreeItem tree3 = tree.items.newChild("universeroot", "Universe"d, "document-open");
+        tree3.newChild("universeobjects", "Objects"d);
+        tree3.newChild("universelocations", "Locations"d);
+        tree3.newChild("universelocationrefs", "LocationRefs"d);
+
+        tree.selectionChange = h;
+
+
+        auto stringthing = new StringListWidget("stringthing");
+        stringthing.items = ["hello", "world"];
+        
+        vlayout.addChild(tree);
+        vlayout.addChild(new ResizerWidget());
+        
+        vlayout.addChild(stringthing);
+        
+        //        tree.layoutWidth = makePercentSize(50); 
+        tree.layoutWidth(FILL_PARENT);       
+        tree.layoutHeight(FILL_PARENT);
+        hlayout.addChild(_grid);
+        hlayout.addChild(new ResizerWidget(null, Orientation.Horizontal));
+        hlayout.addChild(vlayout);
+
+        bodyWidget.addChild(hlayout);
+                tree3.newChild("universelocatifdonrefs", "LocatifdonRefs"d);
+        return bodyWidget;
+    }
+
+}
+
+
+
+mixin APP_ENTRY_POINT;
+
+__gshared  Window window;
+/// entry point for dlangui based application
+extern (C) int UIAppMain(string[] args) {
+
+  // create window  
+   window = Platform.instance.createWindow("Drey Virtual Machine"d, null, WindowFlag.Resizable, 700, 470);
+
+    
+  auto btn = (new Button("btn1", "Button 1"d)).padding(5).margins(10).textColor(0xFF0000).fontSize(30);
+  btn.click = delegate(Widget src) {
+    src.text = "clicking";
+
+    return true;
+  };
+
+  auto root = new DreyFrame();
+
+  // create some widget to show in window
+  window.mainWidget = root;
+  
+  // show window
+  window.show();
+
+    // run message loop
+  return Platform.instance.enterMessageLoop();
+}
+
+class DisassemblyGrid : StringGridWidget
+{
+  private int[int] breakpoints;
+  private int exeLoc;
+  uint bpColour;
+  uint exeColour;
+  this()
+  {
+    bpColour = decodeHexColor("red", 0x000000);
+    exeColour = decodeHexColor("blue", 0x000000);
+  }
+
+  public void updateExec(int row)
+  {
+    exeLoc = row + 1;
+  }
+  
+  public void setBreakpoint(int row)
+  {
+    if(row in breakpoints)
+      {
+        breakpoints.remove(row);
+      }
+    else
+      {
+        breakpoints[row]=1;
+      }
+  }
+  
+  protected override void drawCell(DrawBuf buf, Rect rc, int col, int row)
+  {
+    auto text = cellText(0,row);
+    auto id = text.parse!int;
+    
+    if (_customCellAdapter && _customCellAdapter.isCustomCell(col, row)) {
+      return _customCellAdapter.drawCell(buf, rc, col, row);
+    }
+    if (BACKEND_GUI) 
+      rc.shrink(2, 1);
+    else 
+      rc.right--;
+    FontRef fnt = font;
+    dstring txt = cellText(col, row);
+    Point sz = fnt.textSize(txt);
+    Align ha = Align.Left;
+    //if (sz.y < rc.height)
+    //    applyAlign(rc, sz, ha, Align.VCenter);
+    int offset = BACKEND_CONSOLE ? 0 : 1;
+    if(id == exeLoc)
+      {
+        fnt.drawText(buf, rc.left + offset, rc.top + offset, txt, exeColour);       
+      }
+    else if(id in breakpoints)
+      {
+        fnt.drawText(buf, rc.left + offset, rc.top + offset, txt, bpColour);       
+      }
+    else
+      {
+        fnt.drawText(buf, rc.left + offset, rc.top + offset, txt, textColor);
+      }
+ 
   }
 }
+
+// void main()
+// {
+//   // Prepare our context and sockets
+//   writeln( "start");
+//   auto server = Socket(SocketType.router);
+//   writeln("bdining socket");
+//   server.bind("tcp://*:5560");
+
+//   // Initialize poll set
+//   auto items = [
+//                 PollItem(server, PollFlags.pollIn),
+//                 ];
+//   writeln("spawning server...");
+//   auto worker = spawn(&Server, thisTid);
+    
+//   // Switch messages between sockets
+//   while (true) {
+//     Frame frame;
+//     ClientMessage message;
+
+//     if(!receiveTimeout
+//        (dur!"msecs"(1),
+//         (ClientMessage msg)
+//         {
+//           server.send(msg.client,true);
+//           ubyte[] data = [cast(ubyte)msg.type];
+
+//           if(msg.type == MessageType.Data)
+//             {
+//               server.send(data,true);
+//               //writeln("sending json ", msg.json);
+//               server.send(msg.json);
+//             }
+//           else
+//             {
+//               server.send(data);
+//             }
+
+//         },
+          
+//         (Variant  any) { writeln("unexpected msg ", any);}
+//         ))
+//       {
+//         poll(items, dur!"msecs"(1));
+//         if (items[0].returnedEvents & PollFlags.pollIn) {            
+//           bool invalidMessage = false;
+//           /// first frame will be the id
+//           frame.rebuild();
+//           server.receive(frame);
+//           string client = frame.data.asString;
+//           //            writeln("identifier ", client);
+//           message.client = client.dup;
+//           if(frame.more)
+//             {
+//               frame.rebuild();
+//               server.receive(frame);
+//               // see what sort of message this is
+//               message.type = cast(MessageType)frame.data[0];
+//             }
+//           //            writeln("message type ", message.type);
+//           if(frame.more)
+//             {
+//               if(message.type == MessageType.Data)
+//                 {
+//                   frame.rebuild();
+//                   server.receive(frame);
+//                   message.json = frame.data.asString.dup;
+//                   send(worker, message);
+//                   //                    writeln("sent message to worker ", message);
+//                 }
+//               else
+//                 {                
+//                   //bad message, swallow it up
+//                   invalidMessage = true;
+//                   do {
+//                     frame.rebuild();
+//                     server.receive(frame);
+//                   } while (frame.more);
+//                   writeln("invalid message received");
+//                 }
+
+//             }
+//           else
+//             {
+//               send(worker, message);
+//             }
+//         }
+//       }
+        
+//   }
+// }
