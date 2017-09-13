@@ -243,11 +243,11 @@ const Action ACTION_SET_BREAKPOINT = new Action(IDEActions.SetBreakpoint, "SET_B
 import dlangui.dialogs.filedlg;
 import dlangui.dialogs.dialog;
 
-
 class DreyFrame : AppFrame {
 
     MenuItem mainMenuItems;
 
+  
     override protected void initialize() {
         _appName = "Drey VM";
         super.initialize();
@@ -256,7 +256,6 @@ class DreyFrame : AppFrame {
             statusLine.setStatusText("Drey VM");
           }
         loadScurry("c:\\temp\\test.scur");
-        //        updatePreview();
         postExecution();
     }
 
@@ -320,7 +319,7 @@ class DreyFrame : AppFrame {
   }
   void showInstruction(int number)
   {
-    auto text = (number+1).to!dstring;
+    auto text = format("%X",number+1).to!dstring;
     if(text in _rowLookup)
       {
         _grid.makeCellVisible(3, _rowLookup[text]+1);
@@ -356,12 +355,8 @@ class DreyFrame : AppFrame {
     auto s2 = format("Scope %s",max-1).to!dstring;
 
    
-    TreeItem newNode = _scopes.newChild(s1, "B", null);
+    TreeItem newNode = _scopes.newChild(s1, s2, null);
     invalidate();
-    // root.requestLayout();
-    // root.invalidate();
-    
-    //    parent.invalidate();
 
   }
 
@@ -384,12 +379,26 @@ class DreyFrame : AppFrame {
     
         if(_selectedTree.id.startsWith("machine0stack"))
           {
-            auto items = _vm.CurrentMachine.evalStack.map!(x=>format("%s",x)).array;
+            auto items = _vm.CurrentMachine.evalStack.map!(x=>format("%s",x).to!dstring).array;
             sthing.items = items;
           }
         else if(_selectedTree.id.startsWith("machine0scope"))
           {
-            if(_selectedTree.id != "machine0scopes")
+            if(_selectedTree.id == "machine0scopes")
+              {
+                int scopeIndex = 0;
+                dstring[] items;
+                foreach(scp; _vm.CurrentMachine.scopes)
+                  {
+                    foreach(kvp; scp.locals.byKeyValue)
+                      {
+                        items ~= format("%s: %s => %s", scopeIndex, kvp.key, kvp.value).to!dstring;
+                      }
+                    scopeIndex++;        
+                  }
+                sthing.items = sort(items).array;
+              }
+            else 
               {
                 try
                   {
@@ -400,7 +409,7 @@ class DreyFrame : AppFrame {
                         auto items =
                           _vm.CurrentMachine.scopes[id].locals
                           .byKeyValue                          
-                          .map!(x=>format("%s => %s",x.key, x.value))
+                          .map!(x=>format("%s => %s",x.key, x.value).to!dstring)
                           .array;
                         sthing.items = sort(items).array;
                       }
@@ -414,6 +423,7 @@ class DreyFrame : AppFrame {
 
       }
   }
+  
   void postExecution()
   {
     // update all the things here
@@ -500,8 +510,9 @@ class DreyFrame : AppFrame {
     while(index < _vm.program.length)
       {
         VM.opcode op = cast(VM.opcode)readByte();
-        _grid.setCellText(0,row, index.to!dstring);
-        _rowLookup[index.to!dstring] = row;
+        dstring hex = format("%X", index).to!dstring;
+        _grid.setCellText(0,row,hex);
+        _rowLookup[hex] = row;
         _grid.setCellText(2,row, format("%s", op).to!dstring);
         switch(op)
           {
@@ -522,7 +533,8 @@ class DreyFrame : AppFrame {
           case VM.opcode.lambda:
             int address = readInt();
             int actualAddress = index + address - 4;
-            _grid.setCellText(3,row, actualAddress.to!dstring);
+            dstring text = format("%X",actualAddress).to!dstring;
+            _grid.setCellText(3,row, text);
             break;
           case VM.opcode.ldvalb:
             bool b = readInt() != 0;
@@ -566,7 +578,7 @@ class DreyFrame : AppFrame {
         case IDEActions.SetBreakpoint:
           auto text =_grid.cellText(0,_grid.row);
           ss(text);
-          int index = text.parse!int;
+          int index = parse!int(text,16);
           _breakpoints[index] = 0;
           _grid.setBreakpoint(index);
           return true;
@@ -589,6 +601,10 @@ class DreyFrame : AppFrame {
           postExecution();
           return true;
         case IDEActions.DebuggerStep:
+          if(_vm.CurrentMachine.waitingMessage !is null)
+            {
+              statusLine.setStatusText("Cannot step - waiting on client response");
+            }
           auto oc = peekOpcode(&_vm);
           step(&_vm);
           stepCount++;
@@ -674,7 +690,7 @@ class DreyFrame : AppFrame {
         _grid = new DisassemblyGrid();
         _grid.layoutHeight(FILL_PARENT);
         //_grid.layoutWidth(FILL_PARENT);
-        _grid.layoutWidth = 1200;
+        _grid.layoutWidth = 800;
         
         //        _grid.layoutWidth = makePercentSize(50);
         _grid.showColHeaders = true;
@@ -752,7 +768,7 @@ class DreyFrame : AppFrame {
         hlayout.addChild(vlayout);
 
         bodyWidget.addChild(hlayout);
-                tree3.newChild("universelocatifdonrefs", "LocatifdonRefs"d);
+                tree3.newChild("universelocatifdonrefs", "LocationRefs"d);
         return bodyWidget;
     }
 
@@ -821,7 +837,7 @@ class DisassemblyGrid : StringGridWidget
   protected override void drawCell(DrawBuf buf, Rect rc, int col, int row)
   {
     auto text = cellText(0,row);
-    auto id = text.parse!int;
+    auto id = parse!int(text,16);
     
     if (_customCellAdapter && _customCellAdapter.isCustomCell(col, row)) {
       return _customCellAdapter.drawCell(buf, rc, col, row);

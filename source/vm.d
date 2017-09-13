@@ -28,7 +28,14 @@ class HeapVariant
 
   override string toString()
   {
-    return var.toString;
+    if(auto f = var.peek!Function)
+      {
+        return format("Function : %X", f.functionAddress);
+      }
+    else
+      {
+        return var.toString;
+      }
   }
 
   int opCmp(ref const HeapVariant b)
