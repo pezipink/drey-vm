@@ -14,6 +14,12 @@ import std.random;
 import std.file;
 import std.traits;
 import std.range;
+import std.algorithm;
+import std.array;
+
+public void delegate (string) debugOutput;
+
+
 
 class HeapVariant
 {
@@ -30,7 +36,15 @@ class HeapVariant
   {
     if(auto f = var.peek!Function)
       {
-        return format("Function : %X", f.functionAddress);
+        return format("F:%X", f.functionAddress);
+      }
+    else if(auto r = var.peek!Request)
+      {
+        return format("R : %s %s", r.title, r.actions.map!(x=>format("(%s, %s)", x[0], x[1])).join(","));
+      }
+    else if(auto r = var.peek!(HeapVariant[]*))
+      {
+        return (**r).to!string;
       }
     else
       {
@@ -63,13 +77,37 @@ enum MessageType
     Universe = 0x5
   }
 
-
 void wdb(T...)(T msg)
 {
   if(dbg)
     {
       writeln(msg);
     }
+  if(dbg && debugOutput !is null)
+    {
+      string s;
+      foreach(m;msg)
+        {
+          s ~= format("%s",m);
+        }
+      debugOutput(s);
+    }
+
+      
+}
+
+void output(T...)(T msg)
+{
+  if(debugOutput !is null)
+    {
+      string s;
+      foreach(m;msg)
+        {
+          s ~= format("%s",m);
+        }
+      debugOutput(s);
+    }
+
 }
 
 struct ClientMessage
@@ -194,7 +232,7 @@ class VM
 {
   enum opcode
     {
-      brk,   // breakpoint (future use)
+      brk,   // software breakpoint 
       pop,   // throw away top item 
       ldval,
       ldvals,
@@ -324,6 +362,8 @@ class VM
   string[int] strings;  //string table
   bool finished;
 
+  
+  
   void Initialize(string fileName)
   {
     strings.clear;    
@@ -995,6 +1035,9 @@ bool step(VM* vm)
   // wdb(ms.evalStack);
   switch(ins)
     {
+    case vm.opcode.brk:
+      // do nothing - up to the debugger to honour this
+      break;
     case vm.opcode.pop:
       pop(ms);
       break;
@@ -2246,10 +2289,12 @@ bool step(VM* vm)
       if(auto arr = hv.peek!(HeapVariant[]*))
         {
           write(**arr);
+          output(**arr);
         }
       else
         {
           write(hv.var);
+          output(hv.var);
         }
       break;
     case vm.opcode.dbgl:
@@ -2257,10 +2302,14 @@ bool step(VM* vm)
       if(auto arr = hv.peek!(HeapVariant[]*))
         {
           writeln(**arr);
+          output(**arr);
+          
         }
       else
         {
           writeln(hv.var);
+
+          output(hv.var);
         }
       break;
 
@@ -2311,6 +2360,8 @@ bool handleResponse(VM* vm, string client, JSONValue response)
             else
             {
               push(vm.CurrentMachine, new HeapVariant(id));
+              vm.CurrentMachine.waitingMessage = null;
+              vm.CurrentMachine.validChoices.clear;
               return true;
             }                            
         }
