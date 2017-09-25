@@ -288,6 +288,8 @@ class VM
       createlist,
       appendlist,
       p_appendlist,
+      prependlist,
+      p_prependlist,
       removelist,
       p_removelist,
       len,
@@ -1734,15 +1736,8 @@ bool step(VM* vm)
       break;
 
     case vm.opcode.appendlist: // appends top of stack to next stack (a list )
-      // val :: list
-      //wdb("stack : ", ms.evalStack);
       auto item = pop(ms);
-      //wdb("item is = ", item);
       auto list = pop(ms);
-      
-      //wdb("appendlist ", item, " :: ", list);          
-      // we must peek here to get a pointer otherwise
-      // it will get copied
       if( auto l = list.peek!(HeapVariant[]*))
         {
           **l ~= item;
@@ -1756,7 +1751,6 @@ bool step(VM* vm)
         {
           assert(false, "invalid array");
         }
-      //wdb("list now : ", (list.get!(HeapVariant[]*)));
       break;
 
     case vm.opcode.p_appendlist: // appends top of stack to next stack (a list )
@@ -1784,70 +1778,63 @@ bool step(VM* vm)
       //wdb("list now : ", (list.get!(HeapVariant[])));
       break;
           
+    case vm.opcode.prependlist: // appends top of stack to next stack (a list )
+      auto item = pop(ms);
+      auto list = pop(ms);
+      if( auto l = list.peek!(HeapVariant[]*))
+        {
+          **l = [item] ~ **l;
+        }
+      else if(auto l = list.peek!(HeapVariant[]))
+        {
+          // this case happens with a new list
+          *l = [item] ~ *l;
+        }
+      else
+        {
+          assert(false, "invalid array");
+        }
+      break;
                   
-    case vm.opcode.removelist: //  creates a new list removing keys
+    case vm.opcode.removelist: //  removes matching elements in place
       // val :: list
-      wdb("removelist");
-      wdb("stack : ", ms.evalStack);
       auto key = pop(ms);
-      //wdb("item is = ", key.var);
       auto list = pop(ms);
       assert(list.peek!(HeapVariant[]*));
 
       HeapVariant[] newList;
       if( auto l = list.peek!(HeapVariant[]*))
-        {
+        {          
           foreach(i; **l)
             {
-              wdb("testing if ", i, "!= ", key.var);
               if(i.var != key.var)
                 {
                   newList ~= i;
                 }
             }
+          **l = newList;
         }
 
-      //wdb("list on stack now : ");
-      foreach(l;newList)
-        {
-          wdb(l.var);
-        }
-
-      push(ms, new HeapVariant(newList));
       break;
 
 
-
-
-    case vm.opcode.p_removelist: //  creates a new list removing keys
-      // val :: list
-      //wdb("removelist");
-      //wdb("stack : ", ms.evalStack);
+    case vm.opcode.p_removelist:
       auto key = pop(ms);
-      //wdb("item is = ", key.var);
       auto list = peek(ms);
-      assert(list.peek!(HeapVariant[]));
+      assert(list.peek!(HeapVariant[]*));
 
       HeapVariant[] newList;
-      if( auto l = list.peek!(HeapVariant[]))
-        {
-          foreach(i; *l)
+      if( auto l = list.peek!(HeapVariant[]*))
+        {          
+          foreach(i; **l)
             {
-              //wdb("testing if ", i, "!= ", key.var);
               if(i.var != key.var)
                 {
                   newList ~= i;
                 }
             }
+          **l = newList;
         }
-
-      //wdb("list on stack now : ");
-      foreach(l;newList)
-        {
-          wdb(l.var);
-        }
-          
-      push(ms, new HeapVariant(newList));
       break;
           
     case vm.opcode.index:
@@ -1880,7 +1867,6 @@ bool step(VM* vm)
       auto i = index.get!int;
       if(auto listt = list.peek!(HeapVariant[]))
         {
-          //wdb("listindex ", (*listt), " ", index.var);
           push(ms,(*listt)[i]);
         }
       else if(auto listt = list.peek!(HeapVariant[]*))

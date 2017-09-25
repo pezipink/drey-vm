@@ -662,7 +662,7 @@ class DreyFrame : AppFrame {
           try
             {
               while(_vm.CurrentMachine.pc+1 !in _breakpoints
-                    && _vm.CurrentMachine.pc+1 < _vm.program.length
+                    //                    && _vm.CurrentMachine.pc+1 < _vm.program.length
                     && _vm.CurrentMachine.waitingMessage is null)
                 {
                   oc = peekOpcode(&_vm);
@@ -700,8 +700,8 @@ class DreyFrame : AppFrame {
           postExecution();
           return true;
         case IDEActions.DebuggerStep:
-          if(_vm.CurrentMachine.waitingMessage !is null
-             || _vm.CurrentMachine.pc+1 == _vm.program.length)
+          if(_vm.CurrentMachine.waitingMessage !is null)
+  
             {
               ss("Cannot step - waiting on client response or program terminated.");
               updateClientViewer();
@@ -922,7 +922,8 @@ class DreyFrame : AppFrame {
           {
             ss(msg);
             string x = "\n" ~ msg;
-            debugStringThing.text = x.to!dstring ~ debugStringThing.text ;
+            //            debugStringThing.text = x.to!dstring ~ debugStringThing.text ;
+            debugStringThing.text =  debugStringThing.text ~ x.to!dstring ;
             return;
           };
         auto t1 = tabs.addTab(stringthing, "Inspector"d);
@@ -975,10 +976,11 @@ extern (C) int UIAppMain(string[] args) {
 
   // create some widget to show in window
   window.mainWidget = root;
-  
+
+
   // show window
   window.show();
-
+  window.setWindowState( WindowState.maximized);
     // run message loop
   return Platform.instance.enterMessageLoop();
 }
