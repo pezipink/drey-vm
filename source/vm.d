@@ -90,7 +90,7 @@ void wdb(T...)(T msg)
         {
           s ~= format("%s",m);
         }
-      debugOutput(s);
+      debugOutput(s ~ "\n");
     }
 
       
@@ -268,7 +268,9 @@ class VM
       ceq,
       cne,
       cgt,
+      cgte,
       clt,
+      clte,
       beq,
       bne,
       bgt,
@@ -1306,17 +1308,26 @@ bool step(VM* vm)
 
     case vm.opcode.clt:
       auto vals = pop2(ms);
-      //wdb("clt ", vals);
-      //wdb("clt ", vals[0].var, " == ", vals[1].var              );
       push(ms, new HeapVariant(vals[0].var < vals[1].var));
       break;
 
+    case vm.opcode.clte:
+      auto vals = pop2(ms);
+      push(ms, new HeapVariant(vals[0].var <= vals[1].var));
+      break;
+      
     case vm.opcode.cgt:
       auto vals = pop2(ms);
-      //wdb("cgt ", vals);
       push(ms, new HeapVariant(vals[0].var > vals[1].var));
       break;
 
+    case vm.opcode.cgte:
+      auto vals = pop2(ms);
+      //wdb("cgt ", vals);
+      push(ms, new HeapVariant(vals[0].var >= vals[1].var));
+      break;
+
+      
     case vm.opcode.beq: // address vals
       auto address = readInt(ms,vm);
       auto vals = pop2(ms);
@@ -2288,14 +2299,13 @@ bool step(VM* vm)
       if(auto arr = hv.peek!(HeapVariant[]*))
         {
           writeln(**arr);
-          output(**arr);
+          output(**arr, "\n");
           
         }
       else
         {
           writeln(hv.var);
-
-          output(hv.var);
+          output(hv.var, "\n");
         }
       break;
 
@@ -2447,33 +2457,33 @@ unittest  {
   }
 }
 
-unittest {
-  VM vm = new VM();
-  setupTest(&vm);
-  writeln(vm.strings);
-  while(vm.machines[0].pc < vm.program.length && !vm.finished )
-    {
-      if(step(&vm))
-        {
-          if(!vm.finished)
-            {
-              auto msg = vm.CurrentMachine.waitingMessage.get!ClientMessage;
-              JSONValue j;
-              j["id"]="0";
-              //j["id"]="green-leg";
-              handleResponse(&vm, msg.client, j);
-            }
-        }
-    }
-  writeln("suspended or finished");
-  writeln("Locations count ", vm.universe.locations.length);
-  // foreach(l;vm.universe.locations)
-  //   {
-  //     writeln(l.key);
-  //   }
+// unittest {
+//   VM vm = new VM();
+//   setupTest(&vm);
+//   writeln(vm.strings);
+//   while(vm.machines[0].pc < vm.program.length && !vm.finished )
+//     {
+//       if(step(&vm))
+//         {
+//           if(!vm.finished)
+//             {
+//               auto msg = vm.CurrentMachine.waitingMessage.get!ClientMessage;
+//               JSONValue j;
+//               j["id"]="0";
+//               //j["id"]="green-leg";
+//               handleResponse(&vm, msg.client, j);
+//             }
+//         }
+//     }
+//   writeln("suspended or finished");
+//   writeln("Locations count ", vm.universe.locations.length);
+//   // foreach(l;vm.universe.locations)
+//   //   {
+//   //     writeln(l.key);
+//   //   }
     
   
- }
+//  }
 
 
 //  unittest {

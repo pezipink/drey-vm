@@ -921,9 +921,10 @@ class DreyFrame : AppFrame {
           delegate (string msg)
           {
             ss(msg);
-            string x = "\n" ~ msg;
+            //            string x = "\n" ~ msg;
+            string x = msg;
             //            debugStringThing.text = x.to!dstring ~ debugStringThing.text ;
-            debugStringThing.text =  debugStringThing.text ~ x.to!dstring ;
+            debugStringThing.text = debugStringThing.text ~ x.to!dstring ;
             return;
           };
         auto t1 = tabs.addTab(stringthing, "Inspector"d);
