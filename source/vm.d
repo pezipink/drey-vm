@@ -399,6 +399,7 @@ class VM
   @property HeapVariant[string] players()
   {
      auto p = universe.objects[-1].props["players"].peek!(HeapVariant[string]);
+     
      return (*p);
   }
   
@@ -583,6 +584,10 @@ string toReference(Location loc)
 
 void AnnounceDelta(VM* vm, string op, Tuple!(string,Variant)[] pairs, string visibility)
 {
+  if(debugOutput !is null)
+    {
+      return;
+    }
   JSONValue js;
   js["t"] = op;
   
@@ -630,7 +635,7 @@ void AnnounceDelta(VM* vm, string op, Tuple!(string,Variant)[] pairs, string vis
         (go.props["clientid"].get!string,
          MessageType.Data,
          js.toString);
-      if(vm.isDebug == false)
+      if(vm.isDebug == false && debugOutput is null)
         {
           vm.zmqThread.send(cm);
         }
