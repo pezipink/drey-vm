@@ -2088,7 +2088,7 @@ bool step(VM* vm)
          json);
       newMs.waitingMessage = new HeapVariant(cm);
       writeln("sending suspend message to client ", clientid, " " , cm);
-      output("sending suspend message to client ", clientid, " " , cm);
+      output("sending suspend message to client ", clientid, " " , cm, "\n");
       if(vm.isDebug == false)
         {
           vm.zmqThread.send(cm);
