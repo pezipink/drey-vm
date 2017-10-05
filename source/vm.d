@@ -253,6 +253,7 @@ class VM
       div,
       mod,
       rndi,
+      // replace,
 
       startswith,
       p_startswith,
@@ -665,7 +666,7 @@ string toRequestJson(VM* vm,string header, Tuple!(string,string)[] pairs, bool i
     {
       JSONValue choice;
       choice["id"] = "__UNDO__";      
-      choice["text"] = "";
+      choice["text"] = "UNDO";
       choices ~= choice;  
     }
   
@@ -1203,6 +1204,12 @@ bool step(VM* vm)
       push(ms, new HeapVariant(uniform(vals[0].get!int,vals[1].get!int)));
       break;          
 
+    // case vm.opcode.replace:
+    //   auto newValue = pop(ms);
+    //   auto oldValue = peek(ms); 
+      
+    //   break;
+      
     case vm.opcode.startswith:
       auto val = pop(ms);
       auto str = pop(ms);
@@ -1398,21 +1405,22 @@ bool step(VM* vm)
       break;
 
                     
-    case vm.opcode.cloneobj: // id. does not clone location. assigns new id. leaves on stack.
+    case vm.opcode.cloneobj: //  does not clone location. assigns new id. leaves on stack.
       auto ido = pop(ms);
-      assert(ido.peek!int);
-      auto id = ido.get!int;
-      assert(id in vm.universe.objects);
-      assert(!is(vm.universe.objects[id] == Location));
-      auto obj = vm.universe.objects[id];
+      assert(ido.peek!GameObject);
+      auto obj = ido.get!GameObject;
+      //auto id = go.id;
+      // assert(id in vm.universe.objects);
+      //      assert(!is(vm.universe.objects[id] == Location));
+      //auto obj = vm.universe.objects[id];
       auto newObj = new GameObject();
       newObj.visibility = obj.visibility;
       newObj.id = vm.universe.maxId++;
       foreach(kvp;obj.props.byKeyValue())
         {
           // todo: check for and clone lists
-          // since they will be pointers
-          obj.props[kvp.key]=kvp.value;
+          // since they will be pointers (or have deepclone for this?)
+          newObj.props[kvp.key]=kvp.value;
         }
       //wdb("cloneobj ", id, " -> ", newObj.id);
       //vm.universe.objects[newObj.id] = newObj;      
@@ -2070,7 +2078,7 @@ bool step(VM* vm)
 
       if(vm.machines.length > 2)
         {
-          availChoices["__UNDO__"] = "";
+          availChoices["__UNDO__"] = "UNDO";
         }
       newMs.validChoices = availChoices;      
       auto cm =
@@ -2080,6 +2088,7 @@ bool step(VM* vm)
          json);
       newMs.waitingMessage = new HeapVariant(cm);
       writeln("sending suspend message to client ", clientid, " " , cm);
+      output("sending suspend message to client ", clientid, " " , cm);
       if(vm.isDebug == false)
         {
           vm.zmqThread.send(cm);
@@ -2491,28 +2500,34 @@ unittest  {
 //  }
 
 
-//  unittest {
-//   import std.traits;
-//   import std.algorithm;
-//   auto ops = EnumMembers!(VM.opcode);
-//   // [(list 'stvar x)    (flatten (list #x04 (get-int-bytes(check-string x))))]
-//   //  [(list 'sub)        #x08]
 
-//   auto special = ["stvar", "p_stvar",  "ldval", "ldvals", "ldvalb", "bne", "bgt", "blt", "beq", "branch", "ldvar", "lambda"];  
 
-//   foreach(i,o;ops)
-//     {
-//       string op = o.to!string;
-//       if( special.any!(x=>x==op))
-//         {
-//           writeln("[(list '",op," x)    (flatten (list ",i," (get-int-bytes(check-string x))))]");
-//         }
-//       else
-//         {
-//           writeln("[(list '",op,") ",i,"]"); 
-//         }
+
+
+
+
+ unittest {
+  import std.traits;
+  import std.algorithm;
+  auto ops = EnumMembers!(VM.opcode);
+  // [(list 'stvar x)    (flatten (list #x04 (get-int-bytes(check-string x))))]
+  //  [(list 'sub)        #x08]
+
+  auto special = ["stvar", "p_stvar",  "ldval", "ldvals", "ldvalb", "bne", "bgt", "blt", "beq", "branch", "ldvar", "lambda"];  
+
+  foreach(i,o;ops)
+    {
+      string op = o.to!string;
+      if( special.any!(x=>x==op))
+        {
+          writeln("[(list '",op," x)    (flatten (list ",i," (get-int-bytes(check-string x))))]");
+        }
+      else
+        {
+          writeln("[(list '",op,") ",i,"]"); 
+        }
       
       
-//     }
-// }
+    }
+}
 
