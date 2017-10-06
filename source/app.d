@@ -582,6 +582,7 @@ class DreyFrame : AppFrame {
           case VM.opcode.p_stvar:
           case VM.opcode.ldvals:
           case VM.opcode.ldvar:
+          case VM.opcode.rvar:
             _grid.setCellText(3,row, getString());
             break;
           case VM.opcode.ldval:

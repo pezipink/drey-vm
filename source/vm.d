@@ -241,6 +241,7 @@ class VM
       ldvar,
       stvar,
       p_stvar,
+      rvar, 
       ldprop, // accept game obect or location ref
       p_ldprop,
       stprop,
@@ -252,8 +253,7 @@ class VM
       mul,
       div,
       mod,
-      rndi,
-      // replace,
+      rndi,      
 
       startswith,
       p_startswith,
@@ -1029,6 +1029,22 @@ void locateVar(MachineStatus* ms, string index, Scope* currentScope)
     }
 }
 
+void replaceVar(MachineStatus* ms, string index, Scope* currentScope, HeapVariant newValue)
+{
+  if(index in currentScope.locals)
+    {
+      currentScope.locals[index] = newValue;
+    }
+  else if (currentScope.closureScope !is null)
+    {
+      replaceVar(ms, index, currentScope.closureScope, newValue);
+    }
+  else
+    {
+      assert(false, format("could not locate var %s", index));
+    }
+}
+
 VM.opcode peekOpcode(VM* vm)
 {
   return cast(vm.opcode)vm.program[vm.CurrentMachine.pc];
@@ -1097,6 +1113,12 @@ bool step(VM* vm)
       wdb("stack now ", ms.evalStack);
       break;
 
+    case vm.opcode.rvar: 
+      auto index = getString(ms,vm);
+      auto val = pop(ms);
+      replaceVar(ms, index, ms.currentFrame, val);
+      break;
+      
     case vm.opcode.ldprop: // propname, obj          
       auto name = pop(ms);
       assert(name.peek!string);
@@ -2513,7 +2535,7 @@ unittest  {
   // [(list 'stvar x)    (flatten (list #x04 (get-int-bytes(check-string x))))]
   //  [(list 'sub)        #x08]
 
-  auto special = ["stvar", "p_stvar",  "ldval", "ldvals", "ldvalb", "bne", "bgt", "blt", "beq", "branch", "ldvar", "lambda"];  
+  auto special = ["rvar", "stvar", "p_stvar",  "ldval", "ldvals", "ldvalb", "bne", "bgt", "blt", "beq", "branch", "ldvar", "lambda"];  
 
   foreach(i,o;ops)
     {
