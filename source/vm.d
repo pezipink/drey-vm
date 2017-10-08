@@ -19,8 +19,6 @@ import std.array;
 
 public void delegate (string) debugOutput;
 
-
-
 class HeapVariant
 {
   Variant var;
@@ -233,7 +231,12 @@ class VM
   enum opcode
     {
       brk,   // software breakpoint 
-      pop,   // throw away top item 
+      pop,   // throw away top item
+      swap,  // switch the top two items of the stack
+      swapn,  // switch 2 items of the stack as determined by
+              // stack-x and stack-y where x and y are the upper and lower
+              // 16 bits of the operand
+      dup,   // copy the top item of the stack
       ldval,
       ldvals,
       //      ldvalf,
@@ -248,6 +251,7 @@ class VM
       p_stprop,
       inc,
       dec,
+      neg,
       add,
       sub,
       mul,
@@ -1067,30 +1071,40 @@ bool step(VM* vm)
     case vm.opcode.pop:
       pop(ms);
       break;
-           
-   case vm.opcode.ldval:
+    case vm.opcode.swap:
+      auto temp = ms.evalStack[$-1];
+      ms.evalStack[$-1] = ms.evalStack[$-2];
+      ms.evalStack[$-2] = temp;
+      break;
+    case vm.opcode.swapn:      
+      auto n = readInt(ms,vm);
+      auto x = n & 0xFFFF;
+      auto y = (n >> 16) & 0xFFFF; 
+      auto temp = ms.evalStack[$-1-x];
+      ms.evalStack[$-1-x] = ms.evalStack[$-1-y];
+      ms.evalStack[$-1-y] = temp;
+      break;           
+    case vm.opcode.dup:
+      auto temp = peek(ms);      
+      push(ms, new HeapVariant(temp.var));
+      break;           
+    case vm.opcode.ldval:
       auto val = readInt(ms,vm);
       wdb("ldval ", val);
       push(ms,new HeapVariant(val));
       break;
-
     case vm.opcode.ldvals:
       auto s = getString(ms,vm);
       wdb("ldvals ", s);
       push(ms,new HeapVariant(s));
        wdb("stack  ", ms.evalStack);
       break;
-
     case vm.opcode.ldvalb:
       int b = readInt(ms,vm);
-      //wdb("ldvalb ", b!=0);
       push(ms,new HeapVariant(b!=0));
       break;
       
     case vm.opcode.ldvar: // str
-      // next int will be a index in the string table
-      // which is then looked up in the current stack
-      // frame locals or the global (bottom) frame
       auto index = getString(ms,vm);
       wdb("ldvar ", index);
       locateVar(ms, index, ms.currentFrame);      
@@ -1138,7 +1152,6 @@ bool step(VM* vm)
       auto name = pop(ms);
       auto obj = pop(ms);
       stprop(vm, name.get!string,obj,val);
-
       break;
 
     case vm.opcode.p_stprop: // val :: key :: obj
@@ -1161,6 +1174,7 @@ bool step(VM* vm)
           }
         break;
       }
+
     case vm.opcode.dec:
       {
         auto num = peek(ms);
@@ -1171,6 +1185,24 @@ bool step(VM* vm)
         else
           {
             assert(false, "expected number");
+          }
+        break;
+      }
+      
+    case vm.opcode.neg:
+      {
+        auto num = peek(ms);
+        if(auto n = num.peek!int)
+          {
+            (*n) = -(*n);
+          }
+        else if(auto b = num.peek!bool)
+          {
+            (*b) = !(*b);
+          }
+        else
+          {
+            assert(false, "neg expected number or bool");
           }
         break;
       }
@@ -2535,7 +2567,7 @@ unittest  {
   // [(list 'stvar x)    (flatten (list #x04 (get-int-bytes(check-string x))))]
   //  [(list 'sub)        #x08]
 
-  auto special = ["rvar", "stvar", "p_stvar",  "ldval", "ldvals", "ldvalb", "bne", "bgt", "blt", "beq", "branch", "ldvar", "lambda"];  
+  auto special = ["swapn", "rvar", "stvar", "p_stvar",  "ldval", "ldvals", "ldvalb", "bne", "bgt", "blt", "beq", "branch", "ldvar", "lambda"];  
 
   foreach(i,o;ops)
     {
