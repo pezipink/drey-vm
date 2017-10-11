@@ -5,7 +5,6 @@
 	],
 	"dependencies": {
 		"zmqd": "~>1.1.0",
-		"dlangui": "~>0.9.79"
 
 
 	},

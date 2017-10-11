@@ -16,7 +16,7 @@ import std.traits;
 import std.range;
 import std.algorithm;
 import std.array;
-
+alias wl = writeln;
 public void delegate (string) debugOutput;
 
 class HeapVariant
@@ -72,7 +72,8 @@ enum MessageType
     Heartbeat = 0x2,
     Data  = 0x3,
     Status = 0x4,
-    Universe = 0x5
+    Universe = 0x5,
+    Debug = 0x6
   }
 
 void wdb(T...)(T msg)
@@ -89,9 +90,7 @@ void wdb(T...)(T msg)
           s ~= format("%s",m);
         }
       debugOutput(s ~ "\n");
-    }
-
-      
+    }      
 }
 
 void output(T...)(T msg)
@@ -282,6 +281,12 @@ class VM
       blt, // ho ho ho
       branch,
 
+      isobj,
+      isint,
+      isbool,
+      isloc,
+      islist,
+      
       // AA and list ops
       createobj,
       cloneobj,
@@ -355,7 +360,7 @@ class VM
     }
 
   
-
+  auto extended = ["swapn", "rvar", "stvar", "p_stvar",  "ldval", "ldvals", "ldvalb", "bne", "bgt", "blt", "beq", "branch", "ldvar", "lambda"];  
   // can have many machine status to enable
   // a machine rewind (un-doable co-routines)
   MachineStatus[] machines;  
@@ -370,15 +375,16 @@ class VM
   GameUniverse universe;
   string[int] strings;  //string table
   bool finished;
-
+  ubyte[] rawProgram;
   
+  bool[long] breakpoints;  //used as a set
   
   void Initialize(string fileName)
   {
     strings.clear;    
-    auto raw = cast(ubyte[])read(fileName);
+    rawProgram = cast(ubyte[])read(fileName);
     int entry = 0;
-    readProgram(strings,program,entry,raw);
+    readProgram(strings,program,entry,rawProgram);
     machines = [];
     universe = new GameUniverse();
     machines ~= MachineStatus();
@@ -505,7 +511,7 @@ int readInt(MachineStatus* cr, const VM* vm)
 
 JSONValue serialize(HeapVariant var)
 {
-
+  wdb("in serialize for ", var);
  if(var.peek!string)
    {
      return JSONValue(var.get!string);
@@ -513,6 +519,10 @@ JSONValue serialize(HeapVariant var)
  else if(var.peek!int)
    {
      return JSONValue(var.get!int);
+   }
+  else if(var.peek!bool)
+   {
+     return JSONValue(var.get!bool);
    }
  else if(var.peek!GameObject)
    {
@@ -526,7 +536,8 @@ JSONValue serialize(HeapVariant var)
    }
  else if(var.peek!Function)
    {
-     
+     writeln("FUNCTIONS CANNOT BE SERIALIZED");
+     assert(0);
    }
  else if(auto arr = var.peek!(HeapVariant[]))
    {
@@ -536,9 +547,13 @@ JSONValue serialize(HeapVariant var)
          res ~= serialize(x);              
        }
      return JSONValue(res);
-     assert(false,"not supported yet");
+     // assert(false,"not supported yet");
    }
- assert(0);
+ else
+   {
+     writeln("in serialized, type", var, "is not known");
+   }
+  assert(0);
 
 }
 JSONValue serialize(GameObject go)
@@ -589,10 +604,11 @@ string toReference(Location loc)
 
 void AnnounceDelta(VM* vm, string op, Tuple!(string,Variant)[] pairs, string visibility)
 {
-  if(debugOutput !is null)
-    {
-      return;
-    }
+  // if(debugOutput !is null)
+  //   {
+  //     return;
+  //   }
+  wdb("in annouce delta");
   JSONValue js;
   js["t"] = op;
   
@@ -627,9 +643,11 @@ void AnnounceDelta(VM* vm, string op, Tuple!(string,Variant)[] pairs, string vis
         }
       else
         {
+          wl(format("unsupported type %s", p[1]));
           assert(0, format("unsupported type %s", p[1]));
         }          
     }
+
   
   foreach(p;vm.players)
     {
@@ -642,6 +660,7 @@ void AnnounceDelta(VM* vm, string op, Tuple!(string,Variant)[] pairs, string vis
          js.toString);
       if(vm.isDebug == false && debugOutput is null)
         {
+          writeln("sending announce ", js.toString);
           vm.zmqThread.send(cm);
         }
       else
@@ -1061,12 +1080,14 @@ bool step(VM* vm)
   //   {
       
   auto ins = cast(vm.opcode)readByte(ms,vm);
+  //   writeln("ins ", ms.pc," : ", ins);
   wdb("ins ", ms.pc," : ", ins);
   // wdb(ms.evalStack);
   switch(ins)
     {
     case vm.opcode.brk:
       // do nothing - up to the debugger to honour this
+      // todo: need to detect if debugger is attached
       break;
     case vm.opcode.pop:
       pop(ms);
@@ -1440,6 +1461,71 @@ bool step(VM* vm)
         }
       break;
 
+    case vm.opcode.isobj:
+      {
+        auto val = peek(ms);
+        if(val.peek!GameObject || val.peek!(GameObject))
+          {
+            push(ms, new HeapVariant(true));
+          }
+        else
+          {
+            push(ms, new HeapVariant(false));
+          }        
+        break;
+      }
+    case vm.opcode.isint:
+      {
+        auto val = peek(ms);
+        if(val.peek!int)
+          {
+            push(ms, new HeapVariant(true));
+          }
+        else
+          {
+            push(ms, new HeapVariant(false));
+          }        
+        break;
+      }
+    case vm.opcode.isbool:
+      { auto val = peek(ms);
+        if(val.peek!bool)
+          {
+            push(ms, new HeapVariant(true));
+          }
+        else
+          {
+            push(ms, new HeapVariant(false));
+          }        
+        break;
+      }
+    case vm.opcode.isloc:
+      { auto val = peek(ms);
+        if(val.peek!Location || val.peek!(Location*))
+          {
+            push(ms, new HeapVariant(true));
+          }
+        else
+          {
+            push(ms, new HeapVariant(false));
+          }        
+
+        break;
+      }
+    case vm.opcode.islist:
+      { auto val = peek(ms);
+        if(val.peek!(HeapVariant[]) || val.peek!(HeapVariant[]*))
+          {
+            push(ms, new HeapVariant(true));
+          }
+        else
+          {
+            push(ms, new HeapVariant(false));
+          }        
+
+        break;
+      }
+      
     case vm.opcode.branch: // address
       auto address = readInt(ms,vm);
       ms.pc += address - 5;
