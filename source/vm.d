@@ -279,6 +279,8 @@ class VM
       bne,
       bgt,
       blt, // ho ho ho
+      bt,
+      bf,
       branch,
 
       isobj,
@@ -360,7 +362,7 @@ class VM
     }
 
   
-  auto extended = ["swapn", "rvar", "stvar", "p_stvar",  "ldval", "ldvals", "ldvalb", "bne", "bgt", "blt", "beq", "branch", "ldvar", "lambda"];  
+  auto extended = ["swapn", "rvar", "stvar", "p_stvar",  "ldval", "ldvals", "ldvalb", "bne", "bgt", "blt", "bt", "bf", "beq", "branch", "ldvar", "lambda"];  
   // can have many machine status to enable
   // a machine rewind (un-doable co-routines)
   MachineStatus[] machines;  
@@ -1413,7 +1415,6 @@ bool step(VM* vm)
       //wdb("cgt ", vals);
       push(ms, new HeapVariant(vals[0].var >= vals[1].var));
       break;
-
       
     case vm.opcode.beq: // address vals
       auto address = readInt(ms,vm);
@@ -1461,6 +1462,27 @@ bool step(VM* vm)
         }
       break;
 
+    case vm.opcode.bt: // address 
+      auto address = readInt(ms,vm);
+      auto val = pop(ms);
+      if(val.peek!bool && !val.get!bool)
+        {
+         
+        }
+      else
+        {
+           ms.pc += address - 5;
+        }
+      break;
+
+    case vm.opcode.bf: // address 
+      auto address = readInt(ms,vm);
+      auto val = pop(ms);
+      if(val.peek!bool && !val.get!bool)
+        {
+          ms.pc += address - 5;
+        }
+      break;
     case vm.opcode.isobj:
       {
         auto val = peek(ms);
@@ -2247,7 +2269,9 @@ bool step(VM* vm)
       break;
 
     case vm.opcode.pushscope:
-      vm.CurrentMachine.scopes ~= Scope();
+      Scope s;
+      s.closureScope = &vm.CurrentMachine.scopes[$-1];
+      vm.CurrentMachine.scopes ~= s;
       break;
 
     case vm.opcode.popscope:
@@ -2264,7 +2288,6 @@ bool step(VM* vm)
       wdb(ms.evalStack);
       break;
 
-
     case vm.opcode.apply:
       auto arg = pop(ms);
       auto fh = pop(ms);
@@ -2279,8 +2302,7 @@ bool step(VM* vm)
           vm.CurrentMachine.pc = f.functionAddress;
         }
       else
-        {
-          
+        {          
           assert(false,format("%s : %s not a function value",ms.pc-1, fh));
         }
       
@@ -2653,7 +2675,7 @@ unittest  {
   // [(list 'stvar x)    (flatten (list #x04 (get-int-bytes(check-string x))))]
   //  [(list 'sub)        #x08]
 
-  auto special = ["swapn", "rvar", "stvar", "p_stvar",  "ldval", "ldvals", "ldvalb", "bne", "bgt", "blt", "beq", "branch", "ldvar", "lambda"];  
+  auto special = ["swapn", "rvar", "stvar", "p_stvar",  "ldval", "ldvals", "ldvalb", "bne", "bgt", "blt", "bf", "bt", "beq", "branch", "ldvar", "lambda"];  
 
   foreach(i,o;ops)
     {

@@ -17,46 +17,185 @@ import vm;
 //   @property Scope* currentFrame(){ return &scopes[$-1]; }
 // }
 
-private JSONValue serialize(const Scope* scp)
+// struct Scope
+// {
+//   // this could be a "stack frame" (return address)
+//   // a normal lexical scope (some loop)
+//   // a "stack frame" might have a closure scope
+//   HeapVariant[string] locals;
+//   int returnAddress;
+//   Scope* closureScope;
+//   @property bool IsFunction() { return returnAddress != 0; }
+  
+// }
+
+
+private JSONValue serialize(const Scope* scp, GameObject[int] gos)
 {
-  JSONValue ret;
+  JSONValue ret = ["returnAddress": scp.returnAddress];
+  JSONValue[string] locals;
+  foreach(kvp; scp.locals.byKeyValue)
+    {
+      locals[kvp.key] = serialize(kvp.value, gos);
+    }
+  
+  ret["locals"] = locals;
   return ret;
 }
 
-private JSONValue serialize(const HeapVariant* hv)
+private JSONValue serialize(const HeapVariant hv, GameObject[int] gos)
 {
-  JSONValue ret;
-  return ret;
+  if(auto v = hv.peek!int)
+    {
+      JSONValue ret = ["type": "int"];
+      ret.object["value"] = *v;
+      return ret;
+    }
+  else if(auto v = hv.peek!bool)
+    {
+      JSONValue ret = ["type": "bool"];
+      ret.object["value"] = *v;
+      return ret;
+    }
+  else if(auto v = hv.peek!string)
+    {
+      JSONValue ret = ["type": "string"];
+      ret.object["value"] = *v;
+      return ret;
+    }
+  else if(auto v = hv.peek!GameObject)
+    {
+      JSONValue ret = ["type": "go"];
+      ret["id"] = v.id;
+      auto go = hv.get!GameObject;
+      gos[v.id] = cast(GameObject)go;
+      return ret;
+    }
+  else if(auto v = hv.peek!(GameObject*))
+    {
+      JSONValue ret = ["type": "go*"];
+      ret["id"] = (*v).id;
+      gos[(*v).id] = cast(GameObject)**v;
+      return ret;
+    }
+  else if(auto v = hv.peek!(HeapVariant[string]))
+    {
+      JSONValue ret = ["type": "AA"];
+      return ret;
+    }
+    else if(auto v = hv.peek!(HeapVariant[string]*))
+    {
+      JSONValue ret = ["type": "AA*"];
+      return ret;
+    }
+
+  else if(auto v = hv.peek!(Function))
+    {
+      JSONValue ret = ["type": "function"];
+      ret["address"] = v.functionAddress;
+      return ret;
+    }
+  else if(auto v = hv.peek!(Location))
+    {
+      JSONValue ret = ["type": "location"];
+      return ret;
+    }
+  else if(auto v = hv.peek!(LocationReference))
+    {
+      JSONValue ret = ["type": "locationref"];
+      return ret;
+    }
+
+  else if(auto v = hv.peek!(HeapVariant[]))
+    {
+      JSONValue ret = ["type": "array"];
+      return ret;
+
+    }
+  else if(auto v = hv.peek!(HeapVariant[]*))
+    {
+      JSONValue ret = ["type": "array*"];
+      return ret;
+    }
+  else if(auto v = hv.peek!(ClientMessage))
+    {
+      JSONValue ret = ["type": "clientmessage"];
+      return ret;
+    }
+
+  else
+    {
+      TypeInfo t = hv.var.type;
+      JSONValue ret = ["type": "!!" ~ t.toString];      
+      return ret;
+    }
 }
 
-private JSONValue serialize(const MachineStatus* ms)
+
+private JSONValue serialize(const MachineStatus* ms, GameObject[int] gos)
 {
   JSONValue ret = ["pc" : ms.pc];
   JSONValue[] scopes;
   foreach(ref s; ms.scopes)
     {
-      
+      scopes ~= serialize(&s, gos);
     }
   ret.object["scopes"] = scopes;
 
   JSONValue[] evalStack;
-  foreach(ref hv; ms.evalStack)
+  foreach(hv; ms.evalStack)
     {
-
+      evalStack ~= serialize(hv, gos);
     }
   ret.object["evalStack"] = evalStack;
   
   return ret;
 }
 
-private void buildGeneralAnnounce( VM vm, JSONValue* j)
+public void buildGeneralAnnounce( VM vm, JSONValue* j)
 {
   JSONValue[] machines;
+  GameObject[int] gos;
   foreach(ref m; vm.machines) // todo: chck this foreeach ref!
     {
-      machines ~= serialize(&m);
+      machines ~= serialize(&m, gos);
     }  
   j.object["machines"] = machines;
+  writeln(gos.length);
+  GameObject[int] finalGos;
+  void aux(GameObject go)
+  {
+    finalGos[go.id] = go;
+    foreach(p;go.props)
+      {
+        if(p.peek!GameObject)
+          {
+            aux(p.get!GameObject);
+          }
+        else if(p.peek!(GameObject*))
+          {
+            aux(*p.get!(GameObject*));
+          }
+      }
+  }
+  foreach(g; gos.values)
+    {
+      aux(g);
+    }
+  writeln(finalGos.length);
+  JSONValue[] goArray;
+  
+  foreach(g; finalGos)
+    {
+      JSONValue goj = ["id": g.id];
+      foreach(kvp;g.props.byKeyValue)
+        {
+          goj[kvp.key] = serialize(kvp.value, gos);
+        }
+      goArray ~= goj;
+    }
+
+  j.object["gameobjects"] = goArray;
 }
 
 private void getProgram(const VM vm, JSONValue* j)
@@ -119,7 +258,7 @@ enum DebugResponseAction
 public DebugResponseAction processDebugMessage(VM vm, ClientMessage* message)
 {
   auto j = message.json.parseJSON;
-  writeln("recieved debug message ", j);
+  writeln("recieved debug message ", j); 
   auto id = j["id"].integer;
   auto t = j["type"].str; // type
   switch(t)
@@ -128,7 +267,8 @@ public DebugResponseAction processDebugMessage(VM vm, ClientMessage* message)
       j["success"] = true;
       getProgram(vm, &j);
       message.json = j.toString;
-      return DebugResponseAction.Send;
+      //return DebugResponseAction.Send;
+      return DebugResponseAction.Announce;
     case "set-breakpoint":
       j["success"] = true;
       auto address = j["address"].integer;
