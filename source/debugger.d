@@ -30,7 +30,7 @@ import vm;
 // }
 
 
-private JSONValue serialize(const Scope* scp, GameObject[int] gos)
+private JSONValue serialize(const Scope* scp, GameObject[int]* gos)
 {
   JSONValue ret = ["returnAddress": scp.returnAddress];
   JSONValue[string] locals;
@@ -43,7 +43,7 @@ private JSONValue serialize(const Scope* scp, GameObject[int] gos)
   return ret;
 }
 
-private JSONValue serialize(const HeapVariant hv, GameObject[int] gos)
+private JSONValue serialize(const HeapVariant hv, GameObject[int]* gos)
 {
   if(auto v = hv.peek!int)
     {
@@ -68,14 +68,16 @@ private JSONValue serialize(const HeapVariant hv, GameObject[int] gos)
       JSONValue ret = ["type": "go"];
       ret["id"] = v.id;
       auto go = hv.get!GameObject;
-      gos[v.id] = cast(GameObject)go;
+      writeln("adding GO");
+      (*gos)[v.id] = cast(GameObject)go;
       return ret;
     }
   else if(auto v = hv.peek!(GameObject*))
     {
       JSONValue ret = ["type": "go*"];
       ret["id"] = (*v).id;
-      gos[(*v).id] = cast(GameObject)**v;
+      writeln("adding GO");
+      (*gos)[(*v).id] = cast(GameObject)**v;
       return ret;
     }
   else if(auto v = hv.peek!(HeapVariant[string]))
@@ -132,7 +134,7 @@ private JSONValue serialize(const HeapVariant hv, GameObject[int] gos)
 }
 
 
-private JSONValue serialize(const MachineStatus* ms, GameObject[int] gos)
+private JSONValue serialize(const MachineStatus* ms, GameObject[int]* gos)
 {
   JSONValue ret = ["pc" : ms.pc];
   JSONValue[] scopes;
@@ -158,10 +160,10 @@ public void buildGeneralAnnounce( VM vm, JSONValue* j)
   GameObject[int] gos;
   foreach(ref m; vm.machines) // todo: chck this foreeach ref!
     {
-      machines ~= serialize(&m, gos);
+      machines ~= serialize(&m, &gos);
     }  
   j.object["machines"] = machines;
-  writeln(gos.length);
+  writeln("GO LENGTH : ", gos.length);
   GameObject[int] finalGos;
   void aux(GameObject go)
   {
@@ -182,7 +184,7 @@ public void buildGeneralAnnounce( VM vm, JSONValue* j)
     {
       aux(g);
     }
-  writeln(finalGos.length);
+  writeln("FINAL GOS LENGTH ", finalGos.length);
   JSONValue[] goArray;
   
   foreach(g; finalGos)
@@ -190,7 +192,7 @@ public void buildGeneralAnnounce( VM vm, JSONValue* j)
       JSONValue goj = ["id": g.id];
       foreach(kvp;g.props.byKeyValue)
         {
-          goj[kvp.key] = serialize(kvp.value, gos);
+          goj[kvp.key] = serialize(kvp.value, &gos);
         }
       goArray ~= goj;
     }
@@ -267,7 +269,6 @@ public DebugResponseAction processDebugMessage(VM vm, ClientMessage* message)
       j["success"] = true;
       getProgram(vm, &j);
       message.json = j.toString;
-      //return DebugResponseAction.Send;
       return DebugResponseAction.Announce;
     case "set-breakpoint":
       j["success"] = true;
@@ -279,11 +280,29 @@ public DebugResponseAction processDebugMessage(VM vm, ClientMessage* message)
       auto address = j["address"].integer;
       clearBreakpoint(vm, address);
       return DebugResponseAction.Send;
+    case "run":
+      if(runUntil(&vm))
+        {
+          j["success"] = true;
+          return DebugResponseAction.Announce;          
+        }
+      else
+        {
+          return DebugResponseAction.Nothing;
+        }
+      
     case "step":
-      j["success"] = true;
-      auto address = j["address"].integer;
-      clearBreakpoint(vm, address);
-      return DebugResponseAction.Announce;
+      if(stepInto(&vm))
+        {
+          j["success"] = true;
+          return DebugResponseAction.Announce;          
+        }
+      else
+        {
+          return DebugResponseAction.Nothing;
+        }
+      //clearBreakpoint(vm, address);
+
     default:
       j["success"] = false;
       message.json = j.toString;

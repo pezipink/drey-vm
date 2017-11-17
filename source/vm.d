@@ -157,38 +157,6 @@ class Location
   }
 }
 
-
-class Stack : GameObject
-{
-  enum StackLocation
-    {
-      top,
-      bottom
-    }
-  
-  GameObject[] objects;
-
-  void shuffle(StackLocation loc)
-  {
-    
-  }
-  
-  void deal(int num, StackLocation sourceLoc, Stack* dest)
-  {
-
-  }
-
-  void merge(int num, StackLocation sourceLoc, StackLocation destLoc, Stack* dest)
-  {
-
-  }
-
-  void split(int num, Stack* dest)
-  {
-    
-  }
-}
-
 class GameUniverse
 {
   GameObject[int] objects;
@@ -1075,6 +1043,25 @@ VM.opcode peekOpcode(VM* vm)
   return cast(vm.opcode)vm.program[vm.CurrentMachine.pc];
 }
 
+bool runUntil(VM* vm)
+{
+  while(vm.CurrentMachine.pc+1 !in vm.breakpoints && vm.CurrentMachine.waitingMessage is null)
+    {
+      step(vm);
+    }
+  return true;
+}
+
+bool stepInto(VM* vm)
+{
+  if(vm.CurrentMachine.waitingMessage is null)
+    {
+       step(vm);
+       return true;
+    }
+  return false;
+}
+
 bool step(VM* vm)
 {
   MachineStatus* ms = vm.CurrentMachine;
@@ -1485,7 +1472,7 @@ bool step(VM* vm)
       break;
     case vm.opcode.isobj:
       {
-        auto val = peek(ms);
+        auto val = pop(ms);
         if(val.peek!GameObject || val.peek!(GameObject))
           {
             push(ms, new HeapVariant(true));
@@ -1498,7 +1485,7 @@ bool step(VM* vm)
       }
     case vm.opcode.isint:
       {
-        auto val = peek(ms);
+        auto val = pop(ms);
         if(val.peek!int)
           {
             push(ms, new HeapVariant(true));
@@ -1510,7 +1497,7 @@ bool step(VM* vm)
         break;
       }
     case vm.opcode.isbool:
-      { auto val = peek(ms);
+      { auto val = pop(ms);
         if(val.peek!bool)
           {
             push(ms, new HeapVariant(true));
@@ -1522,7 +1509,7 @@ bool step(VM* vm)
         break;
       }
     case vm.opcode.isloc:
-      { auto val = peek(ms);
+      { auto val = pop(ms);
         if(val.peek!Location || val.peek!(Location*))
           {
             push(ms, new HeapVariant(true));
@@ -1535,7 +1522,7 @@ bool step(VM* vm)
         break;
       }
     case vm.opcode.islist:
-      { auto val = peek(ms);
+      { auto val = pop(ms);
         if(val.peek!(HeapVariant[]) || val.peek!(HeapVariant[]*))
           {
             push(ms, new HeapVariant(true));
@@ -2291,6 +2278,7 @@ bool step(VM* vm)
     case vm.opcode.apply:
       auto arg = pop(ms);
       auto fh = pop(ms);
+      wdb("in apply");
       if(auto f = fh.peek!Function)
         {
           wdb("exeucting function at", f.functionAddress, " args ", arg);
@@ -2300,6 +2288,26 @@ bool step(VM* vm)
           ms.scopes ~= s;
           push(ms,arg);                            
           vm.CurrentMachine.pc = f.functionAddress;
+        }
+      else if(auto o = fh.peek!GameObject)
+        {
+          if("app" in (*o).props)
+            {
+              auto f = (*o).props["app"].get!Function;
+              wdb("exeucting function at", f.functionAddress, " args ", arg);
+              Scope s;
+              s.closureScope = f.closureScope;
+              s.returnAddress = ms.pc;
+              ms.scopes ~= s;
+              push(ms,arg);
+              // push an instance of ourself onto the stack 
+              vm.CurrentMachine.pc = f.functionAddress;              
+            }
+          else
+            {
+              assert(false,format("attempted to apply an object that has no app function"));
+            }
+          
         }
       else
         {          
@@ -2614,7 +2622,7 @@ unittest  {
   
   vm.lastHeart = MonoTime.currTime;
   vm.zmqThread = thisTid;
-  vm.requiredPlayers = 2;
+  vm.requiredPlayers = 1;
   HeapVariant[string] players;
   GameObject state = new GameObject();
   state.id = -1;
@@ -2660,11 +2668,6 @@ unittest  {
     
   
 //  }
-
-
-
-
-
 
 
 

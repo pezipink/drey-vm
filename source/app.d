@@ -39,6 +39,7 @@ void Server(Tid parentId)
   state.props["players"] = new HeapVariant(players);
   vm.universe.objects[-1] = state;
   writeln("vm ready");
+
   
   // initally we process the machine startup until
   // it is ready 
@@ -62,6 +63,16 @@ void Server(Tid parentId)
                     }
                   else
                     {
+                      if(message.client == "__DEBUG__" && debugOutput is null)
+                        {
+
+                          // vm.debugOutput =
+                          //   delegate (string msg)
+                          //   {
+                          //     return;
+                          //   };
+                        }
+                      
                       if(vm.players.length < vm.requiredPlayers)
                         {
                           writeln("client ", message.client, " connected");
@@ -70,9 +81,12 @@ void Server(Tid parentId)
                             {
                               writeln(players);
                               writeln("game starting..");
-                              while(!step(&vm) && !vm.finished)
+                              if(message.client != "__DEBUG__")
                                 {
-                                  //                                  writeln("executing instruction..");
+                                  while(!step(&vm) && !vm.finished)
+                                    {
+                                      //                                  writeln("executing instruction..");
+                                    }
                                 }
                               writeln(players);
                             }
@@ -206,6 +220,13 @@ void Server(Tid parentId)
                           break;
                         case DebugResponseAction.Announce:
                           send(parentId, message);
+                          JSONValue[string] data;
+                          JSONValue ann = data;
+                          buildGeneralAnnounce(vm,&ann);
+                          ann.object["type"] = "announce";
+                          message.json = ann.toString;
+                          writeln("sending ", message.json);
+                          send(parentId, message);
                           break;
                         case DebugResponseAction.Nothing:
                           break;
@@ -241,6 +262,102 @@ void Server(Tid parentId)
     }
 }
 
+
+void main()
+{
+  // Prepare our context and sockets
+  writeln( "start");
+  auto server = Socket(SocketType.router);
+  writeln("bdining socket");
+  server.bind("tcp://*:5560");
+  writeln("bound");
+  // Initialize poll set
+  auto items = [
+                PollItem(server, PollFlags.pollIn),
+                ];
+  writeln("spawning server...");
+  auto worker = spawn(&Server, thisTid);
+
+  // Switch messages between sockets
+  while (true) {
+    Frame frame;
+    ClientMessage message;
+
+    if(!receiveTimeout
+       (dur!"msecs"(1),
+        (ClientMessage msg)
+        {
+          server.send(msg.client,true);
+          ubyte[] data = [cast(ubyte)msg.type];
+
+          if(msg.type == MessageType.Data || msg.type == MessageType.Debug)
+            {
+              server.send(data,true);
+              //writeln("sending json ", msg.json);
+              server.send(msg.json);
+            }
+          else
+            {
+              server.send(data);
+            }
+
+        },
+          
+        (Variant  any) { writeln("unexpected msg ", any);}
+        ))
+      {
+        poll(items, dur!"msecs"(1));
+        if (items[0].returnedEvents & PollFlags.pollIn) {            
+          bool invalidMessage = false;
+          /// first frame will be the id
+          frame.rebuild();
+          server.receive(frame);
+          string client = frame.data.asString;
+          //writeln("identifier ", client);
+          message.client = client.dup;
+          if(frame.more)
+            {
+              frame.rebuild();
+              server.receive(frame);
+              // see what sort of message this is
+              message.type = cast(MessageType)frame.data[0];
+            }
+          //            writeln("message type ", message.type);
+          if(frame.more)
+            {
+              if(message.type == MessageType.Data || message.type == MessageType.Debug)
+                {
+                  frame.rebuild();
+                  server.receive(frame);
+                  message.json = frame.data.asString.dup;
+                  send(worker, message);
+                  //                    writeln("sent message to worker ", message);
+                }
+              else
+                {                
+                  //bad message, swallow it up
+                  invalidMessage = true;
+                  do {
+                    frame.rebuild();
+                    server.receive(frame);
+                  } while (frame.more);
+                  writeln("invalid message received");
+                }
+
+            }
+          else
+            {
+              send(worker, message);
+            }
+        }
+        else
+          {
+            //            writeln ("!");
+          }
+      }
+        
+  }
+}
 
 
 
@@ -618,6 +735,8 @@ void Server(Tid parentId)
 //           case VM.opcode.bgt:
 //           case VM.opcode.blt:
 //           case VM.opcode.beq:
+//           case VM.opcode.bt:
+//           case VM.opcode.bf:
 //           case VM.opcode.branch:
 //           case VM.opcode.lambda:
 //             int address = readInt();
@@ -1182,100 +1301,4 @@ void Server(Tid parentId)
  
 //   }
 // }
-
-void main()
-{
-  // Prepare our context and sockets
-  writeln( "start");
-  auto server = Socket(SocketType.router);
-  writeln("bdining socket");
-  server.bind("tcp://*:5560");
-  writeln("bound");
-  // Initialize poll set
-  auto items = [
-                PollItem(server, PollFlags.pollIn),
-                ];
-  writeln("spawning server...");
-  auto worker = spawn(&Server, thisTid);
-
-  // Switch messages between sockets
-  while (true) {
-    Frame frame;
-    ClientMessage message;
-
-    if(!receiveTimeout
-       (dur!"msecs"(1),
-        (ClientMessage msg)
-        {
-          server.send(msg.client,true);
-          ubyte[] data = [cast(ubyte)msg.type];
-
-          if(msg.type == MessageType.Data || msg.type == MessageType.Debug)
-            {
-              server.send(data,true);
-              //writeln("sending json ", msg.json);
-              server.send(msg.json);
-            }
-          else
-            {
-              server.send(data);
-            }
-
-        },
-          
-        (Variant  any) { writeln("unexpected msg ", any);}
-        ))
-      {
-        poll(items, dur!"msecs"(1));
-        if (items[0].returnedEvents & PollFlags.pollIn) {            
-          bool invalidMessage = false;
-          /// first frame will be the id
-          frame.rebuild();
-          server.receive(frame);
-          string client = frame.data.asString;
-          //writeln("identifier ", client);
-          message.client = client.dup;
-          if(frame.more)
-            {
-              frame.rebuild();
-              server.receive(frame);
-              // see what sort of message this is
-              message.type = cast(MessageType)frame.data[0];
-            }
-          //            writeln("message type ", message.type);
-          if(frame.more)
-            {
-              if(message.type == MessageType.Data || message.type == MessageType.Debug)
-                {
-                  frame.rebuild();
-                  server.receive(frame);
-                  message.json = frame.data.asString.dup;
-                  send(worker, message);
-                  //                    writeln("sent message to worker ", message);
-                }
-              else
-                {                
-                  //bad message, swallow it up
-                  invalidMessage = true;
-                  do {
-                    frame.rebuild();
-                    server.receive(frame);
-                  } while (frame.more);
-                  writeln("invalid message received");
-                }
-
-            }
-          else
-            {
-              send(worker, message);
-            }
-        }
-        else
-          {
-            //            writeln ("!");
-          }
-      }
-        
-  }
-}
 
